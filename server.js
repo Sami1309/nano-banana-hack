@@ -219,7 +219,7 @@ Unifying style: choose one cohesive style direction (e.g., Scandinavian minimal,
 ${ikeaOnly ? 'Retailer constraint: ONLY generate queries that fit IKEA products and naming.' : ''}
 Rules:
 - If the request is for a single product type (e.g., "floor lamp"), produce queries tightly focused on that product.
-- If the request is a general room improvement (e.g., "make my living room cozy"), include different product categories such as couch/sofa, floor lamp, side table, area rug, wall art, indoor plant, shelving, and a query for "cute decor" on Etsy.
+- If the request is a general room improvement (e.g., "make my living room cozy"), include different product categories such as couch/sofa, floor lamp, side table, area rug, wall art, indoor plant, shelving
 - Prefer queries that land on specific product pages with prices.
  - Keep them diverse but cohesive (share style/material/finish keywords).
 Return ONLY a JSON array of 8-10 query strings.`;
@@ -611,18 +611,46 @@ app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
   }
 });
 
+// --- API: Reorganize room layout to fit selected tier ---
+app.post('/api/fal/reorganize', upload.single('space'), async (req, res) => {
+  try {
+    const { productsJson, tier, prompt } = req.body || {};
+    if (!req.file) throw new Error('Missing space image');
+    const tiers = JSON.parse(productsJson || '{}');
+    const chosen = Array.isArray(tiers?.[tier]) ? tiers[tier] : [];
+    if (!chosen.length) throw new Error('No products provided for the selected tier');
+
+    const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    const basePrompt =
+      'Preserve all existing furniture and decor in this exact room; do not remove or restyle them. Reorganize and reposition the existing furniture layout to accommodate the referenced new products, creating a cohesive arrangement. Maintain the room’s original materials, colors, geometry, and camera perspective. Keep natural lighting and realistic shadows. Include every referenced product exactly once; no duplicates, no omissions. Avoid adding or deleting elements beyond positioning.';
+    const input = {
+      prompt: (prompt && String(prompt)) || basePrompt,
+      image_urls: [dataUri, ...chosen].filter(Boolean),
+      num_images: 1,
+    };
+    const out = await fal.subscribe('fal-ai/nano-banana/edit', { input });
+    const url = out?.data?.images?.[0]?.url;
+    if (!url) throw new Error('fal edit returned no image for reorganize');
+    res.json({ reorgUrl: url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 // --- API: Finalize -> isometric edit, then 3D with Hunyuan3D v2.1 ---
 app.post('/api/fal/finalize', async (req, res) => {
   try {
-    const { selectedImageUrl } = req.body;
+    const { selectedImageUrl, selectedTier, tierTitles } = req.body;
     if (!selectedImageUrl) throw new Error('Missing selectedImageUrl');
     console.log('[FAL:finalize] input image len:', selectedImageUrl.length);
 
     // Step 1: make an isometric-style view
+    const isoPrompt = "Reframe this room as a clean isometric view (30–40°)"
+
     const iso = await fal.subscribe('fal-ai/nano-banana/edit', {
       input: {
-        prompt:
-          'Reframe this room as a clean isometric view (30–40°), orthographic feel. Keep the original style, materials, layout, and objects consistent; do not add or remove items beyond the selection. Maintain geometry and realistic lighting.',
+        prompt: isoPrompt,
         image_urls: [selectedImageUrl],
         num_images: 1,
       },

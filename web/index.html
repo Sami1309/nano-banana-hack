@@ -75,6 +75,7 @@
         <h2 class="text-xl font-medium">Visuals</h2>
         <div class="ml-auto flex items-center gap-2">
           <button id="finalizeDrawer" class="px-3 py-1.5 rounded-xl bg-emerald-500 text-black text-sm">Finalize</button>
+          <button id="reorganizeDrawer" class="px-3 py-1.5 rounded-xl bg-white/10 text-sm">Reorganize</button>
           <button id="drawerClose" class="text-sm opacity-70">Close</button>
         </div>
       </div>
@@ -115,7 +116,15 @@
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
         video.srcObject = stream;
+        video.classList.remove('hidden');
       } catch (e) { console.warn('camera error', e); }
+    }
+    function stopCam() {
+      try {
+        const s = video.srcObject;
+        if (s && s.getTracks) s.getTracks().forEach(t => t.stop());
+      } catch {}
+      video.srcObject = null;
     }
     startCam();
 
@@ -142,6 +151,9 @@
         const img = document.getElementById('compositeImg');
         img.src = url;
         document.getElementById('compositeOverlay').classList.remove('hidden');
+        // Ensure live camera is not visible underneath
+        stopCam();
+        video.classList.add('hidden');
       } catch {}
     };
     fileInput.onchange = (e) => {
@@ -152,6 +164,9 @@
         const img = document.getElementById('compositeImg');
         img.src = url;
         document.getElementById('compositeOverlay').classList.remove('hidden');
+        // Ensure live camera is not visible underneath
+        stopCam();
+        video.classList.add('hidden');
       } catch {}
     };
 
@@ -293,6 +308,9 @@
       selectedTier = j.highUrl ? 'high' : (j.midUrl ? 'mid' : 'low');
       updateCompositeView(selectedTier);
       document.getElementById('compositeOverlay').classList.remove('hidden');
+      // Ensure camera hidden when showing composites
+      stopCam();
+      video.classList.add('hidden');
       showControlsUI();
       renderProductList(data); // keep drawer for product-only browsing
     }
@@ -395,7 +413,7 @@
       setLoading(true, 'Finalizing...');
       const r = await fetch('/api/fal/finalize', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selectedImageUrl: url })
+        body: JSON.stringify({ selectedImageUrl: url, selectedTier, tierTitles: (tierProductsUsed[selectedTier]||[]).map(p=>p.title).filter(Boolean) })
       });
       const j = await r.json();
       setLoading(false);
@@ -408,6 +426,37 @@
         box.insertAdjacentHTML('beforeend', `<a class='block mt-3 underline' href='${j.glbUrl}' target='_blank'>Download 3D model (GLB)</a>`);
       }
       openDrawer();
+    };
+
+    // Reorganize current tier: preserve existing items, reposition layout to fit new items
+    const reorgBtn = document.getElementById('reorganizeDrawer');
+    if (reorgBtn) reorgBtn.onclick = async () => {
+      if (!selectedTier) return toast('Select a tier first');
+      if (!spaceBlob) return toast('Take or upload a room photo first');
+      const fd = new FormData();
+      fd.append('space', spaceBlob, 'space.jpg');
+      const tiers = { low: [], mid: [], high: [] };
+      const images = new Set();
+      (tierProductsUsed[selectedTier] || []).forEach(p => { if (p.image && !images.has(p.image)) { tiers[selectedTier].push(p.image); images.add(p.image); } });
+      fd.append('productsJson', JSON.stringify(tiers));
+      fd.append('tier', selectedTier);
+      setLoading(true, 'Reorganizing layout...');
+      const rr = await fetch('/api/fal/reorganize', { method: 'POST', body: fd });
+      const rj = await rr.json();
+      setLoading(false);
+      if (!rr.ok) return toast('Reorganize error: ' + (rj.error || 'unknown'));
+      // Show reorganized image as the current overlay and add to drawer
+      const url = rj.reorgUrl;
+      if (url) {
+        const img = document.getElementById('compositeImg');
+        img.src = url;
+        document.getElementById('compositeOverlay').classList.remove('hidden');
+        stopCam();
+        video.classList.add('hidden');
+        const box = document.getElementById('images');
+        box.insertAdjacentHTML('afterbegin', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Reorganized (${selectedTier.toUpperCase()})</div><img class='w-full' src='${url}'/></div>`);
+        openDrawer();
+      }
     };
 
     // Composite image click -> show product modal for that tier
