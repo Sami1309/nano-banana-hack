@@ -38,6 +38,7 @@ const CSE_API_KEY = process.env.CSE_API_KEY;
 const CSE_CX = process.env.CSE_CX;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const USER_AGENT = 'Mozilla/5.0 (compatible; RoomShopBot/1.0)';
+const ENABLE_3D = String(process.env.ENABLE_3D || '').toLowerCase() === 'true';
 
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
@@ -629,7 +630,12 @@ app.post('/api/fal/finalize', async (req, res) => {
     const isoUrl = iso?.data?.images?.[0]?.url;
     if (!isoUrl) throw new Error('No isometric image from nano-banana');
 
-    // Step 2: 3D via fal-ai/trellis (logs enabled)
+    // Step 2 (optional): 3D generation — disabled unless ENABLE_3D=true
+    if (!ENABLE_3D) {
+      return res.json({ isoImageUrl: isoUrl, glbUrl: null, threeDDisabled: true });
+    }
+
+    // 3D via fal-ai/trellis (logs enabled)
     function findFirstGlbUrl(obj) {
       try {
         const stack = [obj];

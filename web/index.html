@@ -137,8 +137,23 @@
     document.getElementById('btnSnap').onclick = async () => {
       spaceBlob = await captureImageFromVideo();
       toast('Photo captured');
+      try {
+        const url = URL.createObjectURL(spaceBlob);
+        const img = document.getElementById('compositeImg');
+        img.src = url;
+        document.getElementById('compositeOverlay').classList.remove('hidden');
+      } catch {}
     };
-    fileInput.onchange = (e) => { spaceBlob = e.target.files[0]; toast('Photo selected'); };
+    fileInput.onchange = (e) => {
+      spaceBlob = e.target.files[0];
+      toast('Photo selected');
+      try {
+        const url = URL.createObjectURL(spaceBlob);
+        const img = document.getElementById('compositeImg');
+        img.src = url;
+        document.getElementById('compositeOverlay').classList.remove('hidden');
+      } catch {}
+    };
 
     // --- voice to text ---
     const btnVoice = document.getElementById('btnVoice');
@@ -377,7 +392,7 @@
     if (finalizeBtn) finalizeBtn.onclick = async () => {
       const url = latestCompose.highUrl || latestCompose.midUrl || latestCompose.lowUrl;
       if (!url) return toast('Nothing to finalize');
-      setLoading(true, 'Finalizing (3D)...');
+      setLoading(true, 'Finalizing...');
       const r = await fetch('/api/fal/finalize', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ selectedImageUrl: url })
@@ -389,7 +404,9 @@
       const box = document.getElementById('images');
       box.innerHTML = '';
       box.insertAdjacentHTML('beforeend', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Isometric</div><img class='w-full' src='${j.isoImageUrl}'/></div>`);
-      box.insertAdjacentHTML('beforeend', `<a class='block mt-3 underline' href='${j.glbUrl}' target='_blank'>Download 3D model (GLB)</a>`);
+      if (j.glbUrl) {
+        box.insertAdjacentHTML('beforeend', `<a class='block mt-3 underline' href='${j.glbUrl}' target='_blank'>Download 3D model (GLB)</a>`);
+      }
       openDrawer();
     };
 
