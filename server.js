@@ -507,8 +507,8 @@ app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
     async function renderTier(name, productUrls = []) {
       const input = {
         prompt:
-          prompt ||
-          'Place the referenced furniture/products into this room, scale realistically, preserve room geometry, natural lighting. Keep camera angle consistent.',
+          (prompt && String(prompt)) ||
+          'Add the referenced products to this exact room without changing its existing style, layout, structure, materials, wall color, flooring, or geometry. Preserve the camera angle and perspective; maintain natural lighting, shadows, and scale. Include every provided product exactly once; do not substitute or omit any.',
         image_urls: [dataUri, ...productUrls].filter(Boolean),
         num_images: 1,
       };
@@ -542,7 +542,7 @@ app.post('/api/fal/finalize', async (req, res) => {
     const iso = await fal.subscribe('fal-ai/nano-banana/edit', {
       input: {
         prompt:
-          'Reframe this room as a clean isometric view from a 30-40° angle, orthographic feel, keep proportions and materials consistent. No people, no extra props.',
+          'Reframe this room as a clean isometric view (30–40°), orthographic feel. Keep the original style, materials, layout, and objects consistent; do not add or remove items beyond the selection. Maintain geometry and realistic lighting.',
         image_urls: [selectedImageUrl],
         num_images: 1,
       },
