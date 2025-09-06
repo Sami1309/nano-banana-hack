@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RoomShop</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .drawer { transition: transform 0.25s ease; }
+    .drawer.closed { transform: translateX(100%); }
+  </style>
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+  <div class="max-w-xl mx-auto p-4">
+    <header class="flex items-center justify-between gap-2">
+      <h1 class="text-2xl font-semibold">RoomShop</h1>
+      <a href="/health" target="_blank" class="text-xs underline opacity-70">health</a>
+    </header>
+
+    <!-- Camera -->
+    <section class="mt-4 space-y-3">
+      <div class="rounded-2xl overflow-hidden bg-black aspect-[3/4] relative">
+        <video id="cam" playsinline autoplay class="w-full h-full object-cover"></video>
+        <canvas id="snap" class="hidden"></canvas>
+        <div class="absolute bottom-2 right-2 flex gap-2">
+          <button id="btnSnap" class="px-3 py-2 bg-white/80 text-black rounded-xl">Snap</button>
+          <label class="px-3 py-2 bg-white/20 rounded-xl cursor-pointer">Upload
+            <input id="fileInput" type="file" accept="image/*" class="hidden" />
+          </label>
+        </div>
+      </div>
+
+      <textarea id="desc" class="w-full p-3 rounded-xl bg-white/10" rows="3" placeholder="Describe what you want (e.g., ‘modern floor lamp in brass’)"></textarea>
+
+      <div class="flex items-center gap-3">
+        <input id="budget" type="number" min="10" step="5" class="p-3 rounded-xl bg-white/10 w-40" placeholder="Budget (USD)" />
+        <label class="flex items-center gap-2 text-sm opacity-90 select-none">
+          <input id="toggleImages" type="checkbox" checked />
+          Images
+        </label>
+        <button id="btnFind" class="ml-auto px-4 py-2 rounded-xl bg-emerald-500 text-black font-medium">Find options</button>
+      </div>
+
+      <div class="flex gap-2 items-center">
+        <button id="btnVoice" class="px-3 py-2 rounded-xl bg-white/10">🎤 Hold to speak</button>
+        <span id="voiceHint" class="text-sm opacity-70"></span>
+      </div>
+    </section>
+
+    <!-- Tier buttons -->
+    <section class="mt-4 hidden" id="tierControls">
+      <div class="flex gap-2">
+        <button data-tier="low" class="tierBtn px-3 py-2 rounded-xl bg-white/10">Low</button>
+        <button data-tier="mid" class="tierBtn px-3 py-2 rounded-xl bg-white/10">Mid</button>
+        <button data-tier="high" class="tierBtn px-3 py-2 rounded-xl bg-white/10">High</button>
+        <button id="finalize" class="ml-auto px-3 py-2 rounded-xl bg-indigo-500 text-black">Finalize</button>
+      </div>
+    </section>
+
+    <!-- Drawer -->
+    <aside id="drawer" class="drawer closed fixed top-0 right-0 w-full max-w-md h-full bg-gray-900/95 backdrop-blur p-4 overflow-y-auto">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xl font-medium">Visuals</h2>
+        <button id="drawerClose" class="text-sm opacity-70">Close</button>
+      </div>
+      <div id="images" class="mt-3 grid gap-3"></div>
+    </aside>
+
+    <button id="drawerOpen" class="fixed right-3 top-1/2 -translate-y-1/2 px-2 py-1 rounded-l-xl bg-white/10">▸</button>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loading" class="fixed inset-0 hidden items-center justify-center bg-black/60 z-50">
+    <div class="flex items-center gap-3 bg-white text-black px-4 py-3 rounded-xl shadow">
+      <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+      </svg>
+      <span id="loadingText" class="text-sm">Loading...</span>
+    </div>
+  </div>
+
+  <script>
+    // --- camera ---
+    const video = document.getElementById('cam');
+    const canvas = document.getElementById('snap');
+    async function startCam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = stream;
+      } catch (e) { console.warn('camera error', e); }
+    }
+    startCam();
+
+    function captureImageFromVideo() {
+      const w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h) return null;
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+    }
+
+    const fileInput = document.getElementById('fileInput');
+    let spaceBlob = null;
+
+    document.getElementById('btnSnap').onclick = async () => {
+      spaceBlob = await captureImageFromVideo();
+      toast('Photo captured');
+    };
+    fileInput.onchange = (e) => { spaceBlob = e.target.files[0]; toast('Photo selected'); };
+
+    // --- voice to text ---
+    const btnVoice = document.getElementById('btnVoice');
+    const hint = document.getElementById('voiceHint');
+    let mediaRecorder, chunks = [];
+
+    const startRecording = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      chunks = [];
+      mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const fd = new FormData();
+        fd.append('audio', blob, 'audio.webm');
+        setLoading(true, 'Transcribing...');
+        const r = await fetch('/api/stt', { method: 'POST', body: fd });
+        const j = await r.json();
+        setLoading(false);
+        if (j.text) {
+          const d = document.getElementById('desc');
+          d.value = (d.value + ' ' + j.text).trim();
+          toast('Heard: ' + j.text);
+        } else {
+          toast('Could not transcribe');
+        }
+      };
+      mediaRecorder.start();
+      hint.textContent = 'Listening... release to stop';
+    };
+
+    const stopRecording = () => {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        hint.textContent = '';
+      }
+    };
+
+    // Mouse events (desktop)
+    btnVoice.onmousedown = startRecording;
+    btnVoice.onmouseup = stopRecording;
+    btnVoice.onmouseleave = stopRecording;
+    // Touch events (mobile)
+    btnVoice.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
+    btnVoice.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+
+    // --- Product search (Gemini + Google PSE) + fal compose ---
+    const btnFind = document.getElementById('btnFind');
+    const desc = document.getElementById('desc');
+    const budget = document.getElementById('budget');
+    // zip removed
+    const toggleImages = document.getElementById('toggleImages');
+
+    let latestCompose = { lowUrl: null, midUrl: null, highUrl: null };
+
+    btnFind.onclick = async () => {
+      const useImages = !!toggleImages.checked;
+      if (useImages && !spaceBlob) return toast('Take or upload a room photo first');
+      const description = desc.value || 'home decor';
+      setLoading(true, 'Searching products...');
+      const r = await fetch('/api/products', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description, budget: Number(budget.value || 150), image: useImages })
+      });
+      const data = await r.json();
+      if (!r.ok) return toast('Search error: ' + (data.error || 'unknown'));
+
+      // pick top image of each band to guide edit (or collect up to 5)
+      const tiers = { low: [], mid: [], high: [] };
+      for (const k of ['low','mid','high']) {
+        (data[k] || []).slice(0,5).forEach(item => { if (item.image) tiers[k].push(item.image); });
+      }
+
+      // If images disabled -> only list products
+      if (!useImages) {
+        setLoading(false);
+        renderProductList(data);
+        openDrawer();
+        return;
+      }
+
+      // compose with fal nano-banana/edit
+      const fd = new FormData();
+      fd.append('space', spaceBlob, 'space.jpg');
+      fd.append('prompt', `Visualize ${description} in my room. Maintain geometry and lighting; scale realistically.`);
+      fd.append('productsJson', JSON.stringify(tiers));
+      setLoading(true, 'Compositing visuals...');
+      const fr = await fetch('/api/fal/compose', { method: 'POST', body: fd });
+      const j = await fr.json();
+      setLoading(false);
+      if (!fr.ok) return toast('fal compose error: ' + (j.error || 'unknown'));
+
+      latestCompose = j;
+      showDrawer(j);
+      renderProductList(data);
+      document.getElementById('tierControls').classList.remove('hidden');
+    };
+
+    function showDrawer({ lowUrl, midUrl, highUrl }) {
+      const box = document.getElementById('images');
+      box.innerHTML = '';
+      for (const [tier, url] of [['Low',lowUrl],['Mid',midUrl],['High',highUrl]]) {
+        const el = document.createElement('div');
+        el.className = 'rounded-xl overflow-hidden bg-white/5';
+        el.innerHTML = `<div class="p-2 text-sm opacity-80">${tier}</div><img class="w-full" src="${url}" />`;
+        box.appendChild(el);
+      }
+      openDrawer();
+    }
+
+    // Render product lists by tier
+    function renderProductList(data) {
+      const wrapId = 'productList';
+      let wrap = document.getElementById(wrapId);
+      if (!wrap) {
+        const drawer = document.getElementById('drawer');
+        const section = document.createElement('div');
+        section.className = 'mt-6';
+        section.innerHTML = `<div class="flex items-center justify-between"><h3 class="text-lg font-medium">Products</h3></div><div id="${wrapId}" class="mt-3 space-y-4"></div>`;
+        drawer.appendChild(section);
+        wrap = section.querySelector('#' + wrapId);
+      }
+
+      const tiers = [
+        ['Low', data.low || []],
+        ['Mid', data.mid || []],
+        ['High', data.high || []],
+      ];
+      wrap.innerHTML = '';
+      for (const [label, items] of tiers) {
+        const box = document.createElement('div');
+        box.innerHTML = `<div class="text-sm opacity-80 mb-1">${label}</div>`;
+        const list = document.createElement('div');
+        list.className = 'grid gap-2';
+        const arr = items || [];
+        if (!arr.length) {
+          const empty = document.createElement('div');
+          empty.className = 'text-xs opacity-60 italic';
+          empty.textContent = 'No items found in this range';
+          list.appendChild(empty);
+        }
+        arr.forEach(p => {
+          const row = document.createElement('a');
+          row.className = 'flex items-center gap-3 p-2 rounded-xl bg-white/5 hover:bg-white/10';
+          row.href = p.url;
+          row.target = '_blank';
+          row.rel = 'noopener';
+          const img = p.image ? `<img src="${p.image}" alt="${p.title || 'product'}" class="w-16 h-16 object-cover rounded"/>` : '';
+          const price = (p.price != null) ? `${p.currency || 'USD'} $${p.price}` : '';
+          const desc = p.description ? `<div class="text-xs opacity-70 max-h-10 overflow-hidden">${p.description}</div>` : '';
+          const currency = p.currency ? `${p.currency} ` : '';
+          row.innerHTML = `${img}<div class="min-w-0"><div class="truncate text-sm">${p.title || 'Product'}</div><div class="text-xs opacity-70 truncate">${p.source || ''}</div>${desc}</div><div class="ml-auto text-sm">${currency}${price}</div>`;
+          list.appendChild(row);
+        });
+        box.appendChild(list);
+        wrap.appendChild(box);
+      }
+    }
+
+    // tier buttons to focus one image
+    document.querySelectorAll('.tierBtn').forEach(btn => btn.onclick = () => {
+      const t = btn.dataset.tier;
+      const url = latestCompose[`${t}Url`];
+      if (!url) return;
+      const box = document.getElementById('images');
+      box.innerHTML = '';
+      const el = document.createElement('div');
+      el.className = 'rounded-xl overflow-hidden bg-white/5';
+      el.innerHTML = `<div class="p-2 text-sm opacity-80">${t.toUpperCase()}</div><img class="w-full" src="${url}" />`;
+      box.appendChild(el);
+      openDrawer();
+    });
+
+    // finalize -> isometric + 3D
+    document.getElementById('finalize').onclick = async () => {
+      const url = latestCompose.highUrl || latestCompose.midUrl || latestCompose.lowUrl;
+      if (!url) return toast('Nothing to finalize');
+      setLoading(true, 'Finalizing (3D)...');
+      const r = await fetch('/api/fal/finalize', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectedImageUrl: url })
+      });
+      const j = await r.json();
+      setLoading(false);
+      if (!r.ok) return toast('Finalize error: ' + (j.error || 'unknown'));
+
+      const box = document.getElementById('images');
+      box.innerHTML = '';
+      box.insertAdjacentHTML('beforeend', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Isometric</div><img class='w-full' src='${j.isoImageUrl}'/></div>`);
+      box.insertAdjacentHTML('beforeend', `<a class='block mt-3 underline' href='${j.glbUrl}' target='_blank'>Download 3D model (GLB)</a>`);
+      openDrawer();
+    };
+
+    // drawer controls
+    const drawer = document.getElementById('drawer');
+    const drawerOpen = document.getElementById('drawerOpen');
+    const drawerClose = document.getElementById('drawerClose');
+    const openDrawer = () => drawer.classList.remove('closed');
+    const closeDrawer = () => drawer.classList.add('closed');
+    drawerOpen.onclick = openDrawer;
+    drawerClose.onclick = closeDrawer;
+
+    // drag-to-open/close (basic)
+    let startX = null;
+    drawerOpen.addEventListener('touchstart', (e) => { startX = e.touches[0].clientX; });
+    drawerOpen.addEventListener('touchmove', (e) => {
+      if (startX == null) return;
+      const dx = e.touches[0].clientX - startX;
+      if (dx < -40) openDrawer();
+    });
+    drawer.addEventListener('touchstart', (e) => { startX = e.touches[0].clientX; });
+    drawer.addEventListener('touchmove', (e) => {
+      if (startX == null) return;
+      const dx = e.touches[0].clientX - startX;
+      if (dx > 60) closeDrawer();
+    });
+
+    // tiny toast (fixed syntax)
+    function toast(msg) {
+      const d = document.createElement('div');
+      d.textContent = msg;
+      d.className = 'fixed bottom-4 left-1/2 -translate-x-1/2 bg-white text-black px-3 py-2 rounded-xl shadow';
+      document.body.appendChild(d);
+      setTimeout(() => d.remove(), 1800);
+    }
+
+    function setLoading(on, text) {
+      const el = document.getElementById('loading');
+      const t = document.getElementById('loadingText');
+      if (typeof text === 'string') t.textContent = text;
+      if (on) {
+        el.classList.remove('hidden');
+        el.classList.add('flex');
+      } else {
+        el.classList.add('hidden');
+        el.classList.remove('flex');
+      }
+    }
+  </script>
+</body>
+</html>

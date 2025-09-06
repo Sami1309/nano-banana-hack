@@ -1,0 +1,473 @@
+// server.js
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import { fal } from '@fal-ai/client';
+import fetch, { FormData, Blob } from 'node-fetch';
+import { load as loadHTML } from 'cheerio';
+import pLimit from 'p-limit';
+import robotsParser from 'robots-parser';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+
+// serve static frontend
+app.use('/', express.static('web'));
+
+// --- fal.ai setup ---
+fal.config({ credentials: process.env.FAL_KEY });
+
+// --- uploads (memory) ---
+const upload = multer({ storage: multer.memoryStorage() });
+
+// --- request logging ---
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
+
+// --- Programmable Search + Gemini ---
+const CSE_API_KEY = process.env.CSE_API_KEY;
+const CSE_CX = process.env.CSE_CX;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const USER_AGENT = 'Mozilla/5.0 (compatible; RoomShopBot/1.0)';
+
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+
+function priceBands(budget) {
+  const b = Math.max(5, Number(budget || 150));
+  return {
+    low: { min: Math.max(5, Math.round(b * 0.25)), max: Math.round(b * 0.6) },
+    mid: { min: Math.round(b * 0.6), max: Math.round(b * 1.1) },
+    high: { min: Math.round(b * 1.1), max: Math.round(b * 1.8) },
+  };
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 10000) {
+  const ac = new AbortController();
+  const id = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: ac.signal, headers: { 'User-Agent': USER_AGENT, ...(opts.headers || {}) } });
+    return res;
+  } finally { clearTimeout(id); }
+}
+
+async function robotsAllowed(url) {
+  try {
+    const u = new URL(url);
+    const robotsUrl = `${u.origin}/robots.txt`;
+    const r = await fetchWithTimeout(robotsUrl, {}, 4000);
+    if (!r.ok) return true;
+    const txt = await r.text();
+    const robots = robotsParser(robotsUrl, txt);
+    return robots.isAllowed(url, USER_AGENT);
+  } catch {
+    return true;
+  }
+}
+
+function extractProductFromJSONLD(html, pageUrl) {
+  const $ = loadHTML(html);
+  const scripts = Array.from($('script[type="application/ld+json"]')).map(s => $(s).contents().text()).filter(Boolean);
+  const jsons = [];
+  for (const raw of scripts) {
+    try { jsons.push(JSON.parse(raw)); } catch {}
+  }
+  const abs = (u) => {
+    try { return new URL(u, pageUrl).toString(); } catch { return u; }
+  };
+  const flat = [];
+  const flatten = (node) => {
+    if (!node) return;
+    if (Array.isArray(node)) return node.forEach(flatten);
+    if (typeof node === 'object') {
+      flat.push(node);
+      if (node['@graph']) flatten(node['@graph']);
+      if (node.mainEntity) flatten(node.mainEntity);
+    }
+  };
+  jsons.forEach(flatten);
+  const product = flat.find(n => {
+    const t = n['@type'];
+    return t && (Array.isArray(t) ? t.includes('Product') : t === 'Product');
+  });
+  if (!product) return null;
+  const offers = Array.isArray(product.offers) ? product.offers[0] : product.offers;
+  const price = offers?.price ?? offers?.priceSpecification?.price ?? offers?.lowPrice;
+  const priceCurrency = offers?.priceCurrency ?? offers?.priceSpecification?.priceCurrency;
+  let images = [];
+  if (product.image) {
+    if (typeof product.image === 'string') images = [product.image];
+    else if (Array.isArray(product.image)) images = product.image.map(i => typeof i === 'string' ? i : i?.url).filter(Boolean);
+    else if (typeof product.image === 'object' && product.image.url) images = [product.image.url];
+  }
+  images = images.map(abs);
+  const url = product.url || offers?.url || pageUrl;
+  return {
+    isProduct: true,
+    name: product.name || null,
+    description: product.description || null,
+    images,
+    price: price != null ? Number(price) : null,
+    currency: priceCurrency || null,
+    url,
+  };
+}
+
+function extractFallbackMeta(html, pageUrl) {
+  const $ = loadHTML(html);
+  const pick = (sel) => $(sel).attr('content') || null;
+  const name = pick('meta[property="og:title"]') || $('title').text() || null;
+  const description = pick('meta[property="og:description"]') || $('meta[name="description"]').attr('content') || null;
+  const image = pick('meta[property="og:image"]');
+  const abs = (u) => {
+    try { return new URL(u, pageUrl).toString(); } catch { return u; }
+  };
+  const price = pick('meta[property="product:price:amount"]') || pick('meta[itemprop="price"]');
+  const currency = pick('meta[property="product:price:currency"]') || pick('meta[itemprop="priceCurrency"]');
+  // Weak regex fallback for embedded JSON; try to catch first numeric price
+  let priceNum = price != null ? Number(price) : null;
+  if (priceNum == null) {
+    const body = $.html();
+    const m = body && body.match(/\bprice\b\s*[:=]\s*"?(\d{1,5}(?:\.\d{1,2})?)"?/i);
+    if (m) {
+      const n = Number(m[1]);
+      if (!Number.isNaN(n)) priceNum = n;
+    }
+  }
+  return {
+    isProduct: false,
+    name,
+    description,
+    images: image ? [abs(image)] : [],
+    price: priceNum,
+    currency: currency || null,
+    url: pageUrl,
+  };
+}
+
+function prefer(primary, fallback) {
+  if (!primary) return fallback;
+  return {
+    isProduct: true,
+    name: primary.name || fallback.name,
+    description: primary.description || fallback.description,
+    images: (primary.images && primary.images.length ? primary.images : fallback.images) || [],
+    price: primary.price ?? fallback.price ?? null,
+    currency: primary.currency || fallback.currency || null,
+    url: primary.url || fallback.url,
+  };
+}
+
+function looksLikeCategoryUrl(u) {
+  try {
+    const { pathname, search } = new URL(u);
+    const path = pathname.toLowerCase();
+    const q = search.toLowerCase();
+    const categoryHints = [
+      '/s/', '/search', '/category', '/collections', '/browse', '/catalog', '/list', '/plp', '/shop/all', '/c/', '/dept/'
+    ];
+    if (categoryHints.some(h => path.includes(h))) return true;
+    const queryHints = ['?q=', 'search=', 'k=', 'keyword=', 'keywords=', 'refinements=', 'N=', 'Ns='];
+    if (queryHints.some(h => q.includes(h))) return true;
+    return false;
+  } catch { return false; }
+}
+
+async function geminiQueries(idea, budget) {
+  const fallback = [
+    `${idea} buy online`,
+    `${idea} price`,
+    `${idea} best budget`,
+    `${idea} premium`,
+    `${idea} sale`,
+    `${idea} product page`,
+  ];
+  if (!genAI) return fallback;
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const prompt = `Given a user's idea: "${idea}" and an approximate budget ${budget}, produce 6 diverse, retailer-friendly search queries for shopping that will likely return specific product pages with prices. Output JSON array of strings only.`;
+    const resp = await model.generateContent(prompt);
+    const text = resp.response.text();
+    const jsonText = (text.match(/\[([\s\S]*)\]/) || [])[0] || text;
+    const arr = JSON.parse(jsonText);
+    return Array.isArray(arr) && arr.length ? arr.map(String) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function searchProductsWithPSE({ query, limit = 6, sites = [], imageSearch = true }) {
+  const params = new URLSearchParams({
+    key: CSE_API_KEY,
+    cx: CSE_CX,
+    q: query,
+    num: String(Math.min(limit, 10)),
+    safe: 'active',
+  });
+  if (imageSearch) params.set('searchType', 'image');
+  if (sites.length === 1) {
+    params.set('siteSearch', sites[0]);
+    params.set('siteSearchFilter', 'i');
+  } else if (sites.length > 1) {
+    params.set('q', `${query} ${sites.map(s => `site:${s}`).join(' OR ')}`);
+  }
+  const apiUrl = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
+  const safeParams = new URLSearchParams(params);
+  safeParams.delete('key');
+  console.log('[CSE] request:', { imageSearch, url: `https://www.googleapis.com/customsearch/v1?${safeParams.toString()}` });
+  const apiResp = await fetchWithTimeout(apiUrl);
+  if (!apiResp.ok) {
+    const t = await apiResp.text();
+    throw new Error(`Custom Search API error: ${apiResp.status} ${t}`);
+  }
+  const data = await apiResp.json();
+  console.log('[CSE] query ok:', { query, count: Array.isArray(data.items) ? data.items.length : 0 });
+  const items = Array.isArray(data.items) ? data.items : [];
+  return items.map(it => ({
+    title: it.title,
+    imageUrl: imageSearch ? it.link : null,
+    pageUrl: imageSearch ? (it.image?.contextLink || it.link) : it.link,
+  }));
+}
+
+async function hydrateProducts(targets) {
+  const limit = pLimit(4);
+  const out = [];
+  await Promise.all(targets.map(t => limit(async () => {
+    if (!t.pageUrl) return;
+    const allowed = await robotsAllowed(t.pageUrl);
+    if (!allowed) return;
+    try {
+      const r = await fetchWithTimeout(t.pageUrl, {}, 8000);
+      const ct = r.headers.get('content-type') || '';
+      if (!r.ok || !ct.includes('text/html')) return;
+      const html = await r.text();
+      const product = extractProductFromJSONLD(html, t.pageUrl);
+      const fallback = extractFallbackMeta(html, t.pageUrl);
+      const merged = prefer(product, fallback);
+      // Skip obvious category/listing pages unless we positively detected a Product
+      if (!merged.isProduct && looksLikeCategoryUrl(t.pageUrl)) return;
+      // Require price if no Product type (to avoid category pages with OG tags only)
+      if (!merged.isProduct && merged.price == null) return;
+      out.push({
+        source: new URL(t.pageUrl).hostname,
+        title: merged.name || t.title || null,
+        description: merged.description || null,
+        price: merged.price,
+        currency: merged.currency,
+        images: merged.images && merged.images.length ? merged.images : (t.imageUrl ? [t.imageUrl] : []),
+        url: merged.url || t.pageUrl,
+        isProduct: !!merged.isProduct,
+      });
+    } catch {}
+  })));
+  // de-dupe by url
+  const seen = new Set();
+  return out.filter(p => {
+    if (!p.url) return false;
+    if (seen.has(p.url)) return false;
+    seen.add(p.url);
+    return true;
+  });
+}
+
+// POST /api/products { description, budget }
+app.post('/api/products', async (req, res) => {
+  try {
+    if (!CSE_API_KEY || !CSE_CX) throw new Error('Missing CSE_API_KEY or CSE_CX');
+    const { description, budget, image } = req.body || {};
+    const idea = (description || '').trim();
+    if (!idea) return res.status(400).json({ error: 'Missing description' });
+
+    // start with fallback bands from provided budget; may override after hydration
+    let bands = priceBands(budget);
+    const queries = await geminiQueries(idea, budget);
+    console.log('[PRODUCTS] request:', { idea, budget, queries: queries.length, imageSearch: image !== false });
+
+    // Optionally prefer some retailers; can be empty []
+    const retailers = ['wayfair.com','westelm.com','cb2.com','crateandbarrel.com','ikea.com','article.com','target.com'];
+
+    const allTargets = [];
+    for (const q of queries) {
+      try {
+        const targets = await searchProductsWithPSE({ query: q, limit: 6, sites: retailers, imageSearch: image !== false });
+        allTargets.push(...targets);
+        console.log('[CSE] targets appended:', { q, targets: targets.length });
+      } catch (e) {
+        // continue on API hiccups
+        console.warn('[CSE] error for query', q, e?.message || e);
+      }
+    }
+    // Hydrate targets into products
+    const products = await hydrateProducts(allTargets);
+    console.log('[HYDRATE] hydrated products:', products.length);
+    console.log('products are', products);
+
+    // Normalize (keep items even if price is null)
+    const all = products.map(p => ({
+      title: p.title,
+      description: p.description,
+      price: typeof p.price === 'number' ? p.price : null,
+      currency: p.currency || 'USD',
+      image: p.images?.[0] || null,
+      url: p.url,
+      source: p.source,
+    }));
+
+    // Derive bands from returned products' prices
+    const priced = all.filter(p => p.price != null).sort((a,b) => a.price - b.price);
+    let avg = null, p25 = null, p75 = null;
+    if (priced.length >= 1) {
+      avg = priced.reduce((s, p) => s + p.price, 0) / priced.length;
+      const atPct = (arr, pct) => {
+        if (!arr.length) return null;
+        const idx = Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * pct)));
+        return arr[idx].price;
+      };
+      p25 = atPct(priced, 0.25);
+      p75 = atPct(priced, 0.75);
+      bands = {
+        low: { min: 0, max: p25 },
+        mid: { min: p25, max: p75 },
+        high: { min: p75, max: Number.POSITIVE_INFINITY },
+      };
+    }
+
+    // Build tiers from priced items only; ensure in-range
+    const inRange = (p, range) => p.price != null && p.price >= range.min && p.price < range.max;
+    const low = priced.filter(p => inRange(p, bands.low)).slice(0, 5);
+    const mid = priced.filter(p => inRange(p, bands.mid)).slice(0, 5);
+    const high = priced.filter(p => inRange(p, bands.high)).slice(0, 5);
+
+    res.json({ bands: { ...bands, avg }, low, mid, high, allCount: products.length, pricedCount: priced.length });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- API: Compose L/M/H images with fal nano-banana/edit ---
+app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
+  try {
+    const { prompt, productsJson } = req.body;
+    const tiers = JSON.parse(productsJson || '{}');
+    if (!req.file) throw new Error('Missing space image');
+
+    // build data URI for the room photo (faster than an extra upload step)
+    const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    console.log('[FAL:compose] file:', { type: req.file.mimetype, size: req.file.size });
+    console.log('[FAL:compose] tiers:', {
+      low: (tiers.low || []).length,
+      mid: (tiers.mid || []).length,
+      high: (tiers.high || []).length,
+    });
+
+    async function renderTier(name, productUrls = []) {
+      const input = {
+        prompt:
+          prompt ||
+          'Place the referenced furniture/products into this room, scale realistically, preserve room geometry, natural lighting. Keep camera angle consistent.',
+        image_urls: [dataUri, ...productUrls].filter(Boolean),
+        num_images: 1,
+      };
+      const out = await fal.subscribe('fal-ai/nano-banana/edit', { input });
+      const url = out?.data?.images?.[0]?.url;
+      if (!url) throw new Error(`fal edit returned no image for ${name}`);
+      return url;
+    }
+
+    const [lowUrl, midUrl, highUrl] = await Promise.all([
+      renderTier('low', tiers.low || []),
+      renderTier('mid', tiers.mid || []),
+      renderTier('high', tiers.high || []),
+    ]);
+
+    res.json({ lowUrl, midUrl, highUrl });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- API: Finalize -> isometric edit, then 3D with Hunyuan3D v2.1 ---
+app.post('/api/fal/finalize', async (req, res) => {
+  try {
+    const { selectedImageUrl } = req.body;
+    if (!selectedImageUrl) throw new Error('Missing selectedImageUrl');
+    console.log('[FAL:finalize] input image len:', selectedImageUrl.length);
+
+    // Step 1: make an isometric-style view
+    const iso = await fal.subscribe('fal-ai/nano-banana/edit', {
+      input: {
+        prompt:
+          'Reframe this room as a clean isometric view from a 30-40° angle, orthographic feel, keep proportions and materials consistent. No people, no extra props.',
+        image_urls: [selectedImageUrl],
+        num_images: 1,
+      },
+    });
+    const isoUrl = iso?.data?.images?.[0]?.url;
+    if (!isoUrl) throw new Error('No isometric image from nano-banana');
+
+    // Step 2: 3D
+    const threeD = await fal.subscribe('fal-ai/hunyuan3d-v21', {
+      input: {
+        input_image_url: isoUrl,
+        num_inference_steps: 50,
+        guidance_scale: 7.5,
+        octree_resolution: 256,
+        textured_mesh: true,
+      },
+    });
+
+    const glb = threeD?.data?.model_glb?.url || threeD?.data?.model_glb_pbr?.url;
+    if (!glb) throw new Error('Hunyuan3D did not return a GLB url');
+
+    res.json({ isoImageUrl: isoUrl, glbUrl: glb });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- API: ElevenLabs speech-to-text ---
+app.post('/api/stt', upload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) throw new Error('No audio uploaded');
+    console.log('[STT] file:', { type: req.file.mimetype, size: req.file.size });
+
+    const form = new FormData();
+    form.append('model_id', 'scribe_v1');
+    form.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), 'audio.webm');
+
+    const r = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST',
+      headers: { 'xi-api-key': process.env.ELEVEN_API_KEY },
+      body: form,
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`ElevenLabs STT error: ${r.status} ${t}`);
+    }
+    const j = await r.json();
+    console.log('[STT] text len:', (j.text || '').length);
+    res.json({ text: j.text || '' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- health ---
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+// --- start ---
+const PORT = process.env.PORT || 8787;
+app.listen(PORT, () => console.log(`RoomShop server on http://localhost:${PORT}`));
