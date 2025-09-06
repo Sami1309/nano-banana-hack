@@ -166,6 +166,24 @@ function prefer(primary, fallback) {
   };
 }
 
+function isIkeaProductUrl(u) {
+  try {
+    const url = new URL(u);
+    if (!/ikea\.com$/i.test(url.hostname)) return false;
+    // Require product path like /au/en/p/<slug>/...
+    return /^\/[a-z]{2}\/en\/p\//i.test(url.pathname);
+  } catch { return false; }
+}
+
+function isWestElmProductUrl(u) {
+  try {
+    const url = new URL(u);
+    if (!/westelm\.com$/i.test(url.hostname)) return false;
+    // West Elm product pages contain /products/
+    return url.pathname.toLowerCase().includes('/products/');
+  } catch { return false; }
+}
+
 function looksLikeCategoryUrl(u) {
   try {
     const { pathname, search } = new URL(u);
@@ -192,8 +210,13 @@ async function geminiQueries(idea, budget) {
   ];
   if (!genAI) return fallback;
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const prompt = `Given a user's idea: "${idea}" and an approximate budget ${budget}, produce 6 diverse, retailer-friendly search queries for shopping that will likely return specific product pages with prices. Output JSON array of strings only.`;
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const prompt = `You are generating shopping search queries. User request: "${idea}". Budget: ${budget}.
+Rules:
+- If the request is for a single product type (e.g., "floor lamp"), produce queries tightly focused on that product.
+- If the request is a general room improvement (e.g., "make my living room cozy"), include different product categories such as couch/sofa, floor lamp, side table, area rug, wall art, indoor plant, shelving, and a query for "cute decor" on Etsy.
+- Prefer queries that land on specific product pages with prices.
+Return ONLY a JSON array of 8-10 query strings.`;
     const resp = await model.generateContent(prompt);
     const text = resp.response.text();
     const jsonText = (text.match(/\[([\s\S]*)\]/) || [])[0] || text;
@@ -204,7 +227,32 @@ async function geminiQueries(idea, budget) {
   }
 }
 
-async function searchProductsWithPSE({ query, limit = 6, sites = [], imageSearch = true }) {
+function classifyIntent(idea) {
+  const s = (idea || '').toLowerCase();
+  const dict = {
+    lamp: ['floor lamp','table lamp','lamp','lighting','light'],
+    couch: ['sofa','couch','sectional'],
+    table: ['coffee table','side table','end table','console table','table'],
+    rug: ['rug','area rug','carpet'],
+    art: ['wall art','art','poster','print','painting'],
+    plant: ['indoor plant','plant','planter'],
+    shelf: ['shelf','shelving','bookcase','bookshelf'],
+    chair: ['chair','accent chair','armchair','dining chair'],
+    desk: ['desk'],
+    bed: ['bed','bed frame','headboard'],
+    dresser: ['dresser'],
+    mirror: ['mirror']
+  };
+  const hits = [];
+  for (const [type, words] of Object.entries(dict)) {
+    if (words.some(w => s.includes(w))) hits.push(type);
+  }
+  const uniq = [...new Set(hits)];
+  if (uniq.length === 1) return { specific: uniq[0], general: false };
+  return { specific: null, general: true };
+}
+
+async function searchProductsWithPSE({ query, limit = 6, sites = [], imageSearch = true, start = 1 }) {
   const params = new URLSearchParams({
     key: CSE_API_KEY,
     cx: CSE_CX,
@@ -213,6 +261,7 @@ async function searchProductsWithPSE({ query, limit = 6, sites = [], imageSearch
     safe: 'active',
   });
   if (imageSearch) params.set('searchType', 'image');
+  if (start && Number(start) > 1) params.set('start', String(start));
   if (sites.length === 1) {
     params.set('siteSearch', sites[0]);
     params.set('siteSearchFilter', 'i');
@@ -243,6 +292,15 @@ async function hydrateProducts(targets) {
   const out = [];
   await Promise.all(targets.map(t => limit(async () => {
     if (!t.pageUrl) return;
+    try {
+      const host = new URL(t.pageUrl).hostname;
+      if (/ikea\.com$/i.test(host) && !isIkeaProductUrl(t.pageUrl)) {
+        return; // skip non-product ikea URLs
+      }
+      if (/westelm\.com$/i.test(host) && !isWestElmProductUrl(t.pageUrl)) {
+        return; // skip West Elm non-product pages
+      }
+    } catch {}
     const allowed = await robotsAllowed(t.pageUrl);
     if (!allowed) return;
     try {
@@ -257,7 +315,7 @@ async function hydrateProducts(targets) {
       if (!merged.isProduct && looksLikeCategoryUrl(t.pageUrl)) return;
       // Require price if no Product type (to avoid category pages with OG tags only)
       if (!merged.isProduct && merged.price == null) return;
-      out.push({
+      const productOut = {
         source: new URL(t.pageUrl).hostname,
         title: merged.name || t.title || null,
         description: merged.description || null,
@@ -266,7 +324,9 @@ async function hydrateProducts(targets) {
         images: merged.images && merged.images.length ? merged.images : (t.imageUrl ? [t.imageUrl] : []),
         url: merged.url || t.pageUrl,
         isProduct: !!merged.isProduct,
-      });
+      };
+      if (!productOut.title || productOut.price == null || !productOut.images?.length) return;
+      out.push(productOut);
     } catch {}
   })));
   // de-dupe by url
@@ -289,23 +349,45 @@ app.post('/api/products', async (req, res) => {
 
     // start with fallback bands from provided budget; may override after hydration
     let bands = priceBands(budget);
-    const queries = await geminiQueries(idea, budget);
-    console.log('[PRODUCTS] request:', { idea, budget, queries: queries.length, imageSearch: image !== false });
+    const intent = classifyIntent(idea);
+    let queries = await geminiQueries(idea, budget);
+    // If general and image mode, ensure multi-category coverage
+    if (intent.general && image !== false) {
+      const extra = [
+        `${idea} modern couch`,
+        `${idea} floor lamp`,
+        `${idea} side table`,
+        `${idea} area rug`,
+        `${idea} wall art`,
+        `${idea} indoor plant`,
+        `${idea} shelving`,
+        `${idea} cute decor etsy`
+      ];
+      const set = new Set(queries.concat(extra));
+      queries = Array.from(set).slice(0, 12);
+    }
+    console.log('[PRODUCTS] request:', { idea, budget, queries: queries.length, imageSearch: image !== false, intent });
 
     // Optionally prefer some retailers; can be empty []
-    const retailers = ['wayfair.com','westelm.com','cb2.com','crateandbarrel.com','ikea.com','article.com','target.com'];
+    const retailers = ['wayfair.com','westelm.com','cb2.com','crateandbarrel.com','ikea.com','article.com','target.com','etsy.com'];
 
     const allTargets = [];
-    for (const q of queries) {
-      try {
-        const targets = await searchProductsWithPSE({ query: q, limit: 6, sites: retailers, imageSearch: image !== false });
-        allTargets.push(...targets);
-        console.log('[CSE] targets appended:', { q, targets: targets.length });
-      } catch (e) {
-        // continue on API hiccups
-        console.warn('[CSE] error for query', q, e?.message || e);
+    const seenTarget = new Set();
+    const pushTargets = (arr) => {
+      for (const t of arr) {
+        const u = t.pageUrl || t.imageUrl;
+        if (!u || seenTarget.has(u)) continue;
+        seenTarget.add(u);
+        allTargets.push(t);
       }
-    }
+    };
+    const initialTasks = queries.map(q => async () => {
+      const targets = await searchProductsWithPSE({ query: q, limit: 10, sites: retailers, imageSearch: image !== false, start: 1 });
+      pushTargets(targets);
+      console.log('[CSE] targets appended:', { q, targets: targets.length });
+    });
+    const limitInit = pLimit(6);
+    await Promise.all(initialTasks.map(t => limitInit(async () => { try { await t(); } catch (e) { console.warn('[CSE] initial task error', e?.message || e); } })));
     // Hydrate targets into products
     const products = await hydrateProducts(allTargets);
     console.log('[HYDRATE] hydrated products:', products.length);
@@ -323,7 +405,7 @@ app.post('/api/products', async (req, res) => {
     }));
 
     // Derive bands from returned products' prices
-    const priced = all.filter(p => p.price != null).sort((a,b) => a.price - b.price);
+    let priced = all.filter(p => p.price != null).sort((a,b) => a.price - b.price);
     let avg = null, p25 = null, p75 = null;
     if (priced.length >= 1) {
       avg = priced.reduce((s, p) => s + p.price, 0) / priced.length;
@@ -343,11 +425,63 @@ app.post('/api/products', async (req, res) => {
 
     // Build tiers from priced items only; ensure in-range
     const inRange = (p, range) => p.price != null && p.price >= range.min && p.price < range.max;
-    const low = priced.filter(p => inRange(p, bands.low)).slice(0, 5);
-    const mid = priced.filter(p => inRange(p, bands.mid)).slice(0, 5);
-    const high = priced.filter(p => inRange(p, bands.high)).slice(0, 5);
+    let low = priced.filter(p => inRange(p, bands.low)).slice(0, 5);
+    let mid = priced.filter(p => inRange(p, bands.mid)).slice(0, 5);
+    let high = priced.filter(p => inRange(p, bands.high)).slice(0, 5);
 
-    res.json({ bands: { ...bands, avg }, low, mid, high, allCount: products.length, pricedCount: priced.length });
+    // Ensure minimum total priced results (>= 6). If fewer, broaden search.
+    const minTotal = 6;
+    if ((low.length + mid.length + high.length) < minTotal) {
+      console.log('[PRODUCTS] insufficient priced results, expanding search in parallel');
+      const sitePriority = ['ikea.com','article.com','cb2.com','crateandbarrel.com','westelm.com','wayfair.com','target.com','etsy.com'];
+      const startPages = [1, 11, 21];
+      const expandTasks = [];
+      for (const site of sitePriority) {
+        for (const s of startPages) {
+          for (const q of queries.slice(0, 8)) {
+            expandTasks.push(async () => {
+              const more = await searchProductsWithPSE({ query: q, limit: 10, sites: [site], imageSearch: image !== false, start: s });
+              pushTargets(more);
+              const newProducts = await hydrateProducts(more);
+              products.push(...newProducts);
+              const all2 = products.map(p => ({
+                title: p.title,
+                description: p.description,
+                price: typeof p.price === 'number' ? p.price : null,
+                currency: p.currency || 'USD',
+                image: p.images?.[0] || null,
+                url: p.url,
+                source: p.source,
+              }));
+              priced = all2.filter(p => p.price != null).sort((a,b) => a.price - b.price);
+              if (priced.length >= 1) {
+                avg = priced.reduce((s, p) => s + p.price, 0) / priced.length;
+                const atPct = (arr, pct) => {
+                  if (!arr.length) return null;
+                  const idx = Math.max(0, Math.min(arr.length - 1, Math.floor((arr.length - 1) * pct)));
+                  return arr[idx].price;
+                };
+                p25 = atPct(priced, 0.25);
+                p75 = atPct(priced, 0.75);
+                bands = { low: { min: 0, max: p25 }, mid: { min: p25, max: p75 }, high: { min: p75, max: Number.POSITIVE_INFINITY } };
+              }
+              low = priced.filter(p => inRange(p, bands.low)).slice(0, 5);
+              mid = priced.filter(p => inRange(p, bands.mid)).slice(0, 5);
+              high = priced.filter(p => inRange(p, bands.high)).slice(0, 5);
+            });
+          }
+        }
+      }
+      const limitExpand = pLimit(6);
+      let stop = false;
+      await Promise.all(expandTasks.map(task => limitExpand(async () => {
+        if (stop) return;
+        try { await task(); } catch (e) { console.warn('[EXPAND] task error', e?.message || e); }
+        if ((low.length + mid.length + high.length) >= minTotal) stop = true;
+      })));
+    }
+
+    res.json({ bands: { ...bands, avg }, low, mid, high, allCount: products.length, pricedCount: priced.length, intent });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err.message || err) });

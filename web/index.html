@@ -178,10 +178,12 @@
       const data = await r.json();
       if (!r.ok) return toast('Search error: ' + (data.error || 'unknown'));
 
-      // pick top image of each band to guide edit (or collect up to 5)
+      // Build tier image sets for fal compose
       const tiers = { low: [], mid: [], high: [] };
+      const singleType = data.intent && data.intent.specific && !data.intent.general;
+      const perTierMax = singleType ? 1 : 5;
       for (const k of ['low','mid','high']) {
-        (data[k] || []).slice(0,5).forEach(item => { if (item.image) tiers[k].push(item.image); });
+        (data[k] || []).slice(0, perTierMax).forEach(item => { if (item.image) tiers[k].push(item.image); });
       }
 
       // If images disabled -> only list products
@@ -195,7 +197,9 @@
       // compose with fal nano-banana/edit
       const fd = new FormData();
       fd.append('space', spaceBlob, 'space.jpg');
-      fd.append('prompt', `Visualize ${description} in my room. Maintain geometry and lighting; scale realistically.`);
+      const intent = data.intent || {};
+      const composeNote = (intent.specific && !intent.general) ? ` Only include ${intent.specific}(s); do not add unrelated items.` : ` Combine suitable items to match the tier; include complementary products as needed.`;
+      fd.append('prompt', `Visualize ${description} in my room. Maintain geometry and lighting; scale realistically.${composeNote}`);
       fd.append('productsJson', JSON.stringify(tiers));
       setLoading(true, 'Compositing visuals...');
       const fr = await fetch('/api/fal/compose', { method: 'POST', body: fd });
