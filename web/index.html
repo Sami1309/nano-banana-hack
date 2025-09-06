@@ -74,7 +74,7 @@
       <div class="flex items-center justify-between gap-2">
         <h2 class="text-xl font-medium">Visuals</h2>
         <div class="ml-auto flex items-center gap-2">
-          <button id="finalizeDrawer" class="px-3 py-1.5 rounded-xl bg-indigo-500 text-black text-sm">Finalize</button>
+          <button id="finalizeDrawer" class="px-3 py-1.5 rounded-xl bg-emerald-500 text-black text-sm">Finalize</button>
           <button id="drawerClose" class="text-sm opacity-70">Close</button>
         </div>
       </div>
@@ -132,6 +132,7 @@
     let spaceBlob = null;
     let selectedTier = null;
     let tierProductsUsed = { low: [], mid: [], high: [] };
+    let philosophyByTier = null;
 
     document.getElementById('btnSnap').onclick = async () => {
       spaceBlob = await captureImageFromVideo();
@@ -159,8 +160,9 @@
         setLoading(false);
         if (j.text) {
           const d = document.getElementById('desc');
-          if (d) d.value = (d.value + ' ' + j.text).trim();
+          if (d) d.value = j.text.trim();
           toast('Heard: ' + j.text);
+          try { await startSearch(true); } catch (e) { console.error(e); }
         } else {
           toast('Could not transcribe');
         }
@@ -193,7 +195,7 @@
 
     let latestCompose = { lowUrl: null, midUrl: null, highUrl: null };
 
-    async function startSearch() {
+    async function startSearch(fromVoice = false) {
       const useImages = !!toggleImages.checked;
       const description = desc.value || 'home decor';
       const b = Number(budget.value || 150);
@@ -211,9 +213,10 @@
       const singleType = data.intent && data.intent.specific && !data.intent.general;
       const perTierMax = singleType ? 1 : 5;
       tierProductsUsed = { low: [], mid: [], high: [] };
+      const seenGlobal = new Set();
       for (const k of ['low','mid','high']) {
         const items = data[k] || [];
-        const seen = new Set();
+        const seen = seenGlobal;
         const unique = [];
         for (const it of items) {
           const key = it.url || it.image || it.title;
@@ -226,6 +229,25 @@
         tiers[k] = [];
         unique.forEach(item => { if (item.image && !imageSet.has(item.image)) { tiers[k].push(item.image); imageSet.add(item.image); } });
         tierProductsUsed[k] = unique;
+      }
+
+      // If triggered by voice input, request a concise philosophy per tier
+      philosophyByTier = null;
+      if (fromVoice) {
+        try {
+          const payload = {
+            description,
+            budget: b,
+            tiers: {
+              low: tierProductsUsed.low.map(p => ({ title: p.title, price: p.price, currency: p.currency, url: p.url, source: p.source })),
+              mid: tierProductsUsed.mid.map(p => ({ title: p.title, price: p.price, currency: p.currency, url: p.url, source: p.source })),
+              high: tierProductsUsed.high.map(p => ({ title: p.title, price: p.price, currency: p.currency, url: p.url, source: p.source })),
+            },
+          };
+          const pr = await fetch('/api/philosophy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          const pj = await pr.json();
+          if (pr.ok) philosophyByTier = pj;
+        } catch (e) { console.warn('philosophy error', e); }
       }
 
       // If images disabled -> only list products
@@ -282,9 +304,22 @@
         const drawer = document.getElementById('drawer');
         const section = document.createElement('div');
         section.className = 'mt-6';
-        section.innerHTML = `<div class="flex items-center justify-between"><h3 class="text-lg font-medium">Products</h3></div><div id="${wrapId}" class="mt-3 space-y-4"></div>`;
+        section.innerHTML = `<div class=\"flex items-center justify-between\"><h3 class=\"text-lg font-medium\">Products</h3></div><div id=\"philosophy\" class=\"mt-2 space-y-2\"></div><div id=\"${wrapId}\" class=\"mt-3 space-y-4\"></div>`;
         drawer.appendChild(section);
         wrap = section.querySelector('#' + wrapId);
+      }
+
+      // Render philosophy card if present
+      const ph = document.getElementById('philosophy');
+      if (ph) {
+        ph.innerHTML = '';
+        if (philosophyByTier && (philosophyByTier.low || philosophyByTier.mid || philosophyByTier.high)) {
+          const card = document.createElement('div');
+          card.className = 'p-3 rounded-xl bg-white/5';
+          const row = (label, text) => text ? `<div class=\"mb-1\"><span class=\"text-xs opacity-70\">${label}:</span> <span class=\"text-sm\">${text}</span></div>` : '';
+          card.innerHTML = `${row('Low', philosophyByTier.low)}${row('Mid', philosophyByTier.mid)}${row('High', philosophyByTier.high)}`;
+          ph.appendChild(card);
+        }
       }
 
       const tiers = [

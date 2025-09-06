@@ -199,7 +199,8 @@ function looksLikeCategoryUrl(u) {
   } catch { return false; }
 }
 
-async function geminiQueries(idea, budget) {
+async function geminiQueries(idea, budget, opts = {}) {
+  const { ikeaOnly = true } = opts;
   const fallback = [
     `${idea} buy online`,
     `${idea} price`,
@@ -211,11 +212,15 @@ async function geminiQueries(idea, budget) {
   if (!genAI) return fallback;
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const prompt = `You are generating shopping search queries. User request: "${idea}". Budget: ${budget}.
+    const prompt = `You are generating shopping search queries that land on specific product detail pages.
+User request: "${idea}". Budget: ${budget}.
+Unifying style: choose one cohesive style direction (e.g., Scandinavian minimal, mid-century warm wood, Japandi neutral) and weave that into the queries so the products mesh together.
+${ikeaOnly ? 'Retailer constraint: ONLY generate queries that fit IKEA products and naming.' : ''}
 Rules:
 - If the request is for a single product type (e.g., "floor lamp"), produce queries tightly focused on that product.
 - If the request is a general room improvement (e.g., "make my living room cozy"), include different product categories such as couch/sofa, floor lamp, side table, area rug, wall art, indoor plant, shelving, and a query for "cute decor" on Etsy.
 - Prefer queries that land on specific product pages with prices.
+ - Keep them diverse but cohesive (share style/material/finish keywords).
 Return ONLY a JSON array of 8-10 query strings.`;
     const resp = await model.generateContent(prompt);
     const text = resp.response.text();
@@ -343,14 +348,15 @@ async function hydrateProducts(targets) {
 app.post('/api/products', async (req, res) => {
   try {
     if (!CSE_API_KEY || !CSE_CX) throw new Error('Missing CSE_API_KEY or CSE_CX');
-    const { description, budget, image } = req.body || {};
+    const { description, budget, image, ikeaOnly: ikeaOnlyInput, retailers: retailersInput } = req.body || {};
+    const ikeaOnly = ikeaOnlyInput !== false; // default true
     const idea = (description || '').trim();
     if (!idea) return res.status(400).json({ error: 'Missing description' });
 
     // start with fallback bands from provided budget; may override after hydration
     let bands = priceBands(budget);
     const intent = classifyIntent(idea);
-    let queries = await geminiQueries(idea, budget);
+    let queries = await geminiQueries(idea, budget, { ikeaOnly });
     // If general and image mode, ensure multi-category coverage
     if (intent.general && image !== false) {
       const extra = [
@@ -368,8 +374,10 @@ app.post('/api/products', async (req, res) => {
     }
     console.log('[PRODUCTS] request:', { idea, budget, queries: queries.length, imageSearch: image !== false, intent });
 
-    // Optionally prefer some retailers; can be empty []
-    const retailers = ['wayfair.com','westelm.com','cb2.com','crateandbarrel.com','ikea.com','article.com','target.com','etsy.com'];
+    // Retailers: default is IKEA-only; caller can override
+    let retailers = Array.isArray(retailersInput) && retailersInput.length
+      ? retailersInput
+      : (ikeaOnly ? ['ikea.com'] : ['wayfair.com','westelm.com','cb2.com','crateandbarrel.com','ikea.com','article.com','target.com','etsy.com']);
 
     const allTargets = [];
     const seenTarget = new Set();
@@ -393,8 +401,17 @@ app.post('/api/products', async (req, res) => {
     console.log('[HYDRATE] hydrated products:', products.length);
     console.log('products are', products);
 
+    // De-duplicate across all hydrated batches (by URL)
+    const seenProductUrl = new Set();
+    const productsDeduped = products.filter(p => {
+      const u = p?.url;
+      if (!u || seenProductUrl.has(u)) return false;
+      seenProductUrl.add(u);
+      return true;
+    });
+
     // Normalize (keep items even if price is null)
-    const all = products.map(p => ({
+    const all = productsDeduped.map(p => ({
       title: p.title,
       description: p.description,
       price: typeof p.price === 'number' ? p.price : null,
@@ -404,8 +421,17 @@ app.post('/api/products', async (req, res) => {
       source: p.source,
     }));
 
+    // Final defensive de-duplication on normalized records by URL (and image as fallback)
+    const seenAll = new Set();
+    const allUnique = all.filter(p => {
+      const key = p.url || `img:${p.image}`;
+      if (!key || seenAll.has(key)) return false;
+      seenAll.add(key);
+      return true;
+    });
+
     // Derive bands from returned products' prices
-    let priced = all.filter(p => p.price != null).sort((a,b) => a.price - b.price);
+    let priced = allUnique.filter(p => p.price != null).sort((a,b) => a.price - b.price);
     let avg = null, p25 = null, p75 = null;
     if (priced.length >= 1) {
       avg = priced.reduce((s, p) => s + p.price, 0) / priced.length;
@@ -433,7 +459,7 @@ app.post('/api/products', async (req, res) => {
     const minTotal = 6;
     if ((low.length + mid.length + high.length) < minTotal) {
       console.log('[PRODUCTS] insufficient priced results, expanding search in parallel');
-      const sitePriority = ['ikea.com','article.com','cb2.com','crateandbarrel.com','westelm.com','wayfair.com','target.com','etsy.com'];
+      const sitePriority = ikeaOnly ? ['ikea.com'] : ['ikea.com','article.com','cb2.com','crateandbarrel.com','westelm.com','wayfair.com','target.com','etsy.com'];
       const startPages = [1, 11, 21];
       const expandTasks = [];
       for (const site of sitePriority) {
@@ -453,7 +479,15 @@ app.post('/api/products', async (req, res) => {
                 url: p.url,
                 source: p.source,
               }));
-              priced = all2.filter(p => p.price != null).sort((a,b) => a.price - b.price);
+              // de-dup all2 then recalc priced
+              const seen2 = new Set();
+              const all2u = all2.filter(p => {
+                const key = p.url || `img:${p.image}`;
+                if (!key || seen2.has(key)) return false;
+                seen2.add(key);
+                return true;
+              });
+              priced = all2u.filter(p => p.price != null).sort((a,b) => a.price - b.price);
               if (priced.length >= 1) {
                 avg = priced.reduce((s, p) => s + p.price, 0) / priced.length;
                 const atPct = (arr, pct) => {
@@ -481,7 +515,52 @@ app.post('/api/products', async (req, res) => {
       })));
     }
 
-    res.json({ bands: { ...bands, avg }, low, mid, high, allCount: products.length, pricedCount: priced.length, intent });
+    res.json({ bands: { ...bands, avg }, low, mid, high, allCount: productsDeduped.length, pricedCount: priced.length, intent, ikeaOnly, retailers });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- API: Gemini philosophy for tiers ---
+app.post('/api/philosophy', async (req, res) => {
+  try {
+    const { description = '', budget = null, tiers = {} } = req.body || {};
+    const low = Array.isArray(tiers.low) ? tiers.low : [];
+    const mid = Array.isArray(tiers.mid) ? tiers.mid : [];
+    const high = Array.isArray(tiers.high) ? tiers.high : [];
+    if (!genAI) {
+      const brief = (arr, label) => arr.length ? `${label}: focuses on ${arr[0]?.title || 'cohesive items'} within budget.` : `${label}: no picks.`;
+      return res.json({
+        low: brief(low, 'Low'),
+        mid: brief(mid, 'Mid'),
+        high: brief(high, 'High'),
+      });
+    }
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const fmt = (arr) => arr.map(p => `- ${p.title || 'Product'} | ${p.source || ''} | ${p.currency || 'USD'} ${p.price ?? ''}`).join('\n');
+    const prompt = `You are a product design assistant. The user said: "${description}". Budget (approx): ${budget ?? 'n/a'}.
+We have three tiers of cohesive product options chosen to work well together in a single room.
+
+Low tier:\n${fmt(low)}
+Mid tier:\n${fmt(mid)}
+High tier:\n${fmt(high)}
+
+For each tier, write 2 concise sentences that explain the philosophy behind the choices (materials, forms, palette, and how they mesh together). Avoid marketing fluff. Return strict JSON with keys low, mid, high, each a short string.`;
+    const resp = await model.generateContent(prompt);
+    const text = resp.response.text();
+    let json = null;
+    try {
+      const body = (text.match(/\{[\s\S]*\}$/) || [])[0] || text;
+      json = JSON.parse(body);
+    } catch {
+      json = { low: 'Balanced and minimal.', mid: 'Comfort and durability.', high: 'Premium materials and detail.' };
+    }
+    res.json({
+      low: String(json.low || 'Cohesive, budget-friendly essentials.'),
+      mid: String(json.mid || 'Comfort-driven, durable selections.'),
+      high: String(json.high || 'Premium textures and finishes.'),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err.message || err) });
