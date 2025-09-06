@@ -508,7 +508,7 @@ app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
       const input = {
         prompt:
           (prompt && String(prompt)) ||
-          'Add the referenced products to this exact room without changing its existing style, layout, structure, materials, wall color, flooring, or geometry. Preserve the camera angle and perspective; maintain natural lighting, shadows, and scale. Include every provided product exactly once; do not substitute or omit any.',
+          'Add only the referenced products to this exact room without changing the background or existing elements. Do not modify or remove any existing furniture, decor, walls, windows, floor, ceiling, or lighting. Preserve the original style, layout, colors, materials, geometry, perspective, and camera angle. Maintain natural lighting and shadows consistent with the room. Include every provided product exactly once; no duplicates, no substitutions, no omissions.',
         image_urls: [dataUri, ...productUrls].filter(Boolean),
         num_images: 1,
       };
@@ -550,19 +550,35 @@ app.post('/api/fal/finalize', async (req, res) => {
     const isoUrl = iso?.data?.images?.[0]?.url;
     if (!isoUrl) throw new Error('No isometric image from nano-banana');
 
-    // Step 2: 3D
-    const threeD = await fal.subscribe('fal-ai/hunyuan3d-v21', {
-      input: {
-        input_image_url: isoUrl,
-        num_inference_steps: 50,
-        guidance_scale: 7.5,
-        octree_resolution: 256,
-        textured_mesh: true,
+    // Step 2: 3D via fal-ai/trellis (logs enabled)
+    function findFirstGlbUrl(obj) {
+      try {
+        const stack = [obj];
+        while (stack.length) {
+          const cur = stack.pop();
+          if (!cur) continue;
+          if (typeof cur === 'string' && /\.glb(\?.*)?$/i.test(cur)) return cur;
+          if (Array.isArray(cur)) { for (const v of cur) stack.push(v); continue; }
+          if (typeof cur === 'object') {
+            for (const k of Object.keys(cur)) stack.push(cur[k]);
+          }
+        }
+      } catch {}
+      return null;
+    }
+
+    const threeD = await fal.subscribe('fal-ai/trellis', {
+      input: { image_url: isoUrl },
+      logs: true,
+      onQueueUpdate: (update) => {
+        if (update?.status === 'IN_PROGRESS' && Array.isArray(update.logs)) {
+          update.logs.map((l) => l.message).forEach((m) => console.log('[TRELLIS]', m));
+        }
       },
     });
 
-    const glb = threeD?.data?.model_glb?.url || threeD?.data?.model_glb_pbr?.url;
-    if (!glb) throw new Error('Hunyuan3D did not return a GLB url');
+    const glb = findFirstGlbUrl(threeD?.data);
+    if (!glb) throw new Error('Trellis did not return a GLB url');
 
     res.json({ isoImageUrl: isoUrl, glbUrl: glb });
   } catch (err) {
