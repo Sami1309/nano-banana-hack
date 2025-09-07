@@ -47,21 +47,24 @@
         </div>
       </div>
 
+      <!-- Voice toggle moved a bit higher -->
+      <div class="flex gap-2 items-center">
+        <button id="btnVoice" class="px-3 py-2 rounded-xl bg-white/10">🎤 Speak</button>
+        <span id="voiceHint" class="text-sm opacity-70"></span>
+      </div>
+
       <textarea id="desc" class="w-full p-3 rounded-xl bg-white/10" rows="3" placeholder="Describe what you want (e.g., ‘modern shelving unit’)"></textarea>
 
       <div class="flex items-center gap-3">
         <input id="budget" type="number" min="10" step="5" class="p-3 rounded-xl bg-white/10 w-40" placeholder="Budget (USD)" />
         <label class="flex items-center gap-2 text-sm opacity-90 select-none">
-          <input id="toggleImages" type="checkbox" checked />
+          <!-- <input id="toggleImages" type="checkbox" checked />
           Images
-        </label>
+        </label> -->
         <button id="btnFind" class="ml-auto px-4 py-2 rounded-xl bg-emerald-500 text-black font-medium">Find options</button>
       </div>
 
-      <div class="flex gap-2 items-center">
-        <button id="btnVoice" class="px-3 py-2 rounded-xl bg-white/10">🎤 Hold to speak</button>
-        <span id="voiceHint" class="text-sm opacity-70"></span>
-      </div>
+      
 
       <!-- Refine controls (shown after first results) -->
       <div id="refineSection" class="mt-3 hidden">
@@ -249,10 +252,24 @@
       } catch {}
     };
 
-    // --- voice to text ---
+    // --- voice to text (toggle) ---
     const btnVoice = document.getElementById('btnVoice');
     const hint = document.getElementById('voiceHint');
-    let mediaRecorder, chunks = [];
+    let mediaRecorder, chunks = [], isRecording = false;
+
+    function setVoiceUI(on) {
+      if (on) {
+        btnVoice.classList.remove('bg-white/10');
+        btnVoice.classList.add('bg-red-500','text-black');
+        btnVoice.textContent = '🔴 Recording';
+        hint.textContent = 'Tap to stop and search';
+      } else {
+        btnVoice.classList.add('bg-white/10');
+        btnVoice.classList.remove('bg-red-500','text-black');
+        btnVoice.textContent = '🎤 Speak';
+        hint.textContent = '';
+      }
+    }
 
     const startRecording = async () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -260,6 +277,8 @@
       chunks = [];
       mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
       mediaRecorder.onstop = async () => {
+        setVoiceUI(false);
+        isRecording = false;
         const blob = new Blob(chunks, { type: 'audio/webm' });
         const fd = new FormData();
         fd.append('audio', blob, 'audio.webm');
@@ -277,23 +296,17 @@
         }
       };
       mediaRecorder.start();
-      hint.textContent = 'Listening... release to stop';
+      isRecording = true;
+      setVoiceUI(true);
     };
 
     const stopRecording = () => {
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-        hint.textContent = '';
-      }
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     };
 
-    // Mouse events (desktop)
-    btnVoice.onmousedown = startRecording;
-    btnVoice.onmouseup = stopRecording;
-    btnVoice.onmouseleave = stopRecording;
-    // Touch events (mobile)
-    btnVoice.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
-    btnVoice.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+    btnVoice.onclick = async () => {
+      if (isRecording) stopRecording(); else await startRecording();
+    };
 
     // --- Product search (Gemini + Google PSE) + fal compose ---
     const btnFind = document.getElementById('btnFind');
@@ -712,11 +725,7 @@
 
     // Voice button in bottom bar mirrors main voice control
     const btnVoiceBar = document.getElementById('btnVoiceBar');
-    btnVoiceBar.onmousedown = btnVoice.onmousedown;
-    btnVoiceBar.onmouseup = btnVoice.onmouseup;
-    btnVoiceBar.onmouseleave = btnVoice.onmouseleave;
-    btnVoiceBar.ontouchstart = (e) => { e.preventDefault(); btnVoice.onmousedown(); };
-    btnVoiceBar.ontouchend = (e) => { e.preventDefault(); btnVoice.onmouseup(); };
+    if (btnVoiceBar) btnVoiceBar.onclick = () => btnVoice.click();
 
     // Show bottom bar when overlay is active
     function showControlsUI() {
