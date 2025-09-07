@@ -58,9 +58,9 @@
       <div class="flex items-center gap-3">
         <input id="budget" type="number" min="10" step="5" class="p-3 rounded-xl bg-white/10 w-40" placeholder="Budget (USD)" />
         <label class="flex items-center gap-2 text-sm opacity-90 select-none">
-          <!-- <input id="toggleImages" type="checkbox" checked />
+          <input id="toggleImages" type="checkbox" checked />
           Images
-        </label> -->
+        </label>
         <button id="btnFind" class="ml-auto px-4 py-2 rounded-xl bg-emerald-500 text-black font-medium">Find options</button>
       </div>
 
@@ -367,7 +367,14 @@
       const useImages = !!toggleImages.checked;
       const description = desc.value || 'home decor';
       const b = Number(budget.value || 150);
-      if (useImages && !spaceBlob && !composeBaseUrl) return toast('Take or upload a room photo first');
+      if (useImages && !spaceBlob && !composeBaseUrl) {
+        // Try to auto-capture from live camera to keep UX smooth
+        try {
+          const snap = await captureImageFromVideo();
+          if (snap) { spaceBlob = snap; }
+        } catch {}
+        if (!spaceBlob) return toast('Take or upload a room photo first');
+      }
       setLoading(true, 'Searching products...');
       const r = await fetch('/api/products', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
