@@ -811,7 +811,11 @@ app.post('/api/stt', upload.single('audio'), async (req, res) => {
 
     const form = new FormData();
     form.append('model_id', 'scribe_v1');
-    form.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), 'audio.webm');
+    const mt = req.file.mimetype || 'audio/webm';
+    let ext = 'webm';
+    if (/mp4/i.test(mt)) ext = 'mp4';
+    else if (/ogg/i.test(mt)) ext = 'ogg';
+    form.append('file', new Blob([req.file.buffer], { type: mt }), `audio.${ext}`);
 
     const r = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
       method: 'POST',

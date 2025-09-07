@@ -17,7 +17,7 @@
   <div class="max-w-xl mx-auto p-4">
     <header class="flex items-center justify-between gap-2">
       <h1 class="text-2xl font-semibold">RoomShop</h1>
-      <a href="/health" target="_blank" class="text-xs underline opacity-70">health</a>
+      <!-- <a href="/health" target="_blank" class="text-xs underline opacity-70">health</a> -->
     </header>
 
     <!-- Camera -->
@@ -255,7 +255,7 @@
     // --- voice to text (toggle) ---
     const btnVoice = document.getElementById('btnVoice');
     const hint = document.getElementById('voiceHint');
-    let mediaRecorder, chunks = [], isRecording = false;
+    let mediaRecorder, mediaStream, chunks = [], isRecording = false, recMime = 'audio/webm';
 
     function setVoiceUI(on) {
       if (on) {
@@ -271,17 +271,53 @@
       }
     }
 
+    function pickMimeType() {
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/ogg',
+        'audio/mp4'
+      ];
+      for (const t of candidates) {
+        try { if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t; } catch {}
+      }
+      return '';
+    }
+
     const startRecording = async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        toast('Mic unavailable');
+        return;
+      }
+      const mt = pickMimeType();
+      recMime = mt || '';
+      const options = recMime ? { mimeType: recMime } : {};
+      try {
+        mediaRecorder = new MediaRecorder(mediaStream, options);
+      } catch (e) {
+        // fallback: try without options
+        try { mediaRecorder = new MediaRecorder(mediaStream); }
+        catch { toast('Recording unsupported on this device'); mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; return; }
+      }
       chunks = [];
       mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
       mediaRecorder.onstop = async () => {
         setVoiceUI(false);
         isRecording = false;
+        try { if (mediaStream) mediaStream.getTracks().forEach(t=>t.stop()); } catch {}
+        mediaStream = null;
         const blob = new Blob(chunks, { type: 'audio/webm' });
+        // Use chosen mime for blob + filename
+        const usedMime = recMime || blob.type || 'audio/webm';
+        const useBlob = new Blob(chunks, { type: usedMime });
+        let ext = 'webm';
+        if (/mp4/i.test(usedMime)) ext = 'mp4';
+        else if (/ogg/i.test(usedMime)) ext = 'ogg';
         const fd = new FormData();
-        fd.append('audio', blob, 'audio.webm');
+        fd.append('audio', useBlob, `audio.${ext}`);
         setLoading(true, 'Transcribing...');
         const r = await fetch('/api/stt', { method: 'POST', body: fd });
         const j = await r.json();
@@ -307,6 +343,10 @@
     btnVoice.onclick = async () => {
       if (isRecording) stopRecording(); else await startRecording();
     };
+
+    // Mobile tap support: map touchend to click (prevents long-press hover delays)
+    btnVoice.ontouchstart = (e) => { e.preventDefault(); };
+    btnVoice.ontouchend = (e) => { e.preventDefault(); btnVoice.click(); };
 
     // --- Product search (Gemini + Google PSE) + fal compose ---
     const btnFind = document.getElementById('btnFind');
