@@ -22,7 +22,7 @@
 
     <!-- Camera -->
     <section class="mt-4 space-y-3">
-      <div class="rounded-2xl overflow-hidden bg-black aspect-[3/4] relative">
+      <div id="frameBox" class="rounded-2xl overflow-hidden bg-black aspect-[3/4] md:aspect-[16/9] relative">
         <video id="cam" playsinline autoplay class="w-full h-full object-cover"></video>
         <canvas id="snap" class="hidden"></canvas>
         <!-- Composite overlay in center -->
@@ -150,11 +150,20 @@
     startCam();
 
     function captureImageFromVideo() {
-      const w = video.videoWidth, h = video.videoHeight;
-      if (!w || !h) return null;
-      canvas.width = w; canvas.height = h;
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return null;
+      // Target aspect ratio matches the visible frame box (responsive)
+      const frame = document.getElementById('frameBox');
+      const fw = frame?.clientWidth || 3;
+      const fh = frame?.clientHeight || 4;
+      const desired = fw / fh; // width/height
+      let cw = vw, ch = Math.round(vw / desired);
+      if (ch > vh) { ch = vh; cw = Math.round(vh * desired); }
+      const sx = Math.floor((vw - cw) / 2);
+      const sy = Math.floor((vh - ch) / 2);
+      canvas.width = cw; canvas.height = ch;
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, w, h);
+      ctx.drawImage(video, sx, sy, cw, ch, 0, 0, cw, ch);
       return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
     }
 
@@ -250,12 +259,13 @@
     let latestCompose = { lowUrl: null, midUrl: null, highUrl: null };
     let lastSearch = { description: '', budget: 150, image: true };
     let lastIsoUrl = null;
+    let composeBaseUrl = null; // when set, compose uses existing composite instead of original room photo
 
     async function startSearch(fromVoice = false) {
       const useImages = !!toggleImages.checked;
       const description = desc.value || 'home decor';
       const b = Number(budget.value || 150);
-      if (useImages && !spaceBlob) return toast('Take or upload a room photo first');
+      if (useImages && !spaceBlob && !composeBaseUrl) return toast('Take or upload a room photo first');
       setLoading(true, 'Searching products...');
       const r = await fetch('/api/products', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -317,7 +327,8 @@
 
       // compose with fal nano-banana/edit
       const fd = new FormData();
-      fd.append('space', spaceBlob, 'space.jpg');
+      if (composeBaseUrl) fd.append('baseImageUrl', composeBaseUrl);
+      else fd.append('space', spaceBlob, 'space.jpg');
       const intent = data.intent || {};
       const composeNote = (intent.specific && !intent.general)
         ? ` Only include ${intent.specific}(s); do not add unrelated items. Include all referenced products.`
@@ -467,7 +478,8 @@
         const tj = await tr.json();
         setLoading(false);
         if (!tr.ok) return toast('3D error: ' + (tj.error || 'unknown'));
-        const glbUrl = tj.glbUrl;
+        const glbUrl = tj.proxyUrl || tj.glbUrl;
+        console.log('3D model URL:', tj.glbUrl);
         if (!glbUrl) return toast('No 3D model');
         const mv = document.getElementById('modelViewer');
         mv.src = glbUrl;
@@ -483,7 +495,8 @@
       if (!selectedTier) return toast('Select a tier first');
       if (!spaceBlob) return toast('Take or upload a room photo first');
       const fd = new FormData();
-      fd.append('space', spaceBlob, 'space.jpg');
+      if (composeBaseUrl) fd.append('baseImageUrl', composeBaseUrl);
+      else fd.append('space', spaceBlob, 'space.jpg');
       const tiers = { low: [], mid: [], high: [] };
       const images = new Set();
       (tierProductsUsed[selectedTier] || []).forEach(p => { if (p.image && !images.has(p.image)) { tiers[selectedTier].push(p.image); images.add(p.image); } });
@@ -590,6 +603,43 @@
       startCam();
     };
 
+    // Add more / Start new (after first images)
+    // Buttons are added to the bottom bar near tier toggles
+    const bar = document.querySelector('#bottomBar .flex.items-center.gap-2');
+    if (bar) {
+      const wrap = document.createElement('div');
+      wrap.className = 'flex gap-2 ml-2';
+      wrap.innerHTML = `<button id="btnAddMore" class="px-3 py-2 rounded-xl bg-white/10">Add more</button><button id="btnStartNew" class="px-3 py-2 rounded-xl bg-white/10">Start new</button>`;
+      bar.appendChild(wrap);
+      const btnAddMore = document.getElementById('btnAddMore');
+      const btnStartNew = document.getElementById('btnStartNew');
+      btnAddMore.onclick = () => {
+        const url = (selectedTier && latestCompose[`${selectedTier}Url`]) || latestCompose.highUrl || latestCompose.midUrl || latestCompose.lowUrl;
+        if (!url) return toast('No current image to extend');
+        composeBaseUrl = url;
+        toast('Will add to current image. Use Refine to specify what to add.');
+      };
+      btnStartNew.onclick = () => {
+        composeBaseUrl = null;
+        latestCompose = { lowUrl: null, midUrl: null, highUrl: null };
+        selectedTier = null;
+        tierProductsUsed = { low: [], mid: [], high: [] };
+        if (spaceBlob) {
+          const url = URL.createObjectURL(spaceBlob);
+          const img = document.getElementById('compositeImg');
+          img.src = url;
+          document.getElementById('compositeOverlay').classList.remove('hidden');
+          stopCam(); video.classList.add('hidden');
+          toast('Starting new with original photo');
+        } else {
+          // No photo yet – restart camera
+          document.getElementById('compositeOverlay').classList.add('hidden');
+          startCam();
+          toast('Starting new');
+        }
+      };
+    }
+
     // Voice button in bottom bar mirrors main voice control
     const btnVoiceBar = document.getElementById('btnVoiceBar');
     btnVoiceBar.onmousedown = btnVoice.onmousedown;
@@ -602,9 +652,6 @@
     function showControlsUI() {
       document.getElementById('bottomBar').classList.remove('hidden');
     }
-  </script>
-</body>
-</html>
     // 3D modal close handlers
     document.getElementById('modelModalClose').onclick = () => document.getElementById('modelModal').classList.add('hidden');
     document.getElementById('modelModal').addEventListener('click', (e) => {
@@ -658,7 +705,7 @@
       const { categories, budgetShift } = parseRefine(txt);
       const newBudget = Math.max(10, Math.round((lastSearch.budget || 150) * budgetShift));
       const useImages = lastSearch.image;
-      if (useImages && !spaceBlob) return toast('Take or upload a room photo first');
+      if (useImages && !spaceBlob && !composeBaseUrl) return toast('Take or upload a room photo first');
       setLoading(true, 'Refining...');
       const r = await fetch('/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description: `${lastSearch.description}. ${txt}`, budget: newBudget, image: useImages }) });
       const data = await r.json();
@@ -710,7 +757,8 @@
       // Compose again with merged products
       if (!useImages) { renderProductList(data); openDrawer(); return; }
       const fd = new FormData();
-      fd.append('space', spaceBlob, 'space.jpg');
+      if (composeBaseUrl) fd.append('baseImageUrl', composeBaseUrl);
+      else fd.append('space', spaceBlob, 'space.jpg');
       fd.append('prompt', 'Add only the referenced products to this exact room without changing the background or existing elements. Do not modify or remove any existing furniture, decor, walls, windows, floor, ceiling, or lighting. Preserve original style, layout, colors, materials, geometry, and camera perspective; maintain natural lighting and scale. Include every provided product exactly once; no duplicates, no substitutions, no omissions.');
       fd.append('productsJson', JSON.stringify(tiers));
       setLoading(true, 'Updating visuals...');
@@ -727,3 +775,6 @@
       renderProductList(data);
     }
     btnRefine.onclick = refineSearch;
+  </script>
+</body>
+</html>

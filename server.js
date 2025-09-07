@@ -571,13 +571,18 @@ For each tier, write 2 concise sentences that explain the philosophy behind the 
 // --- API: Compose L/M/H images with fal nano-banana/edit ---
 app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
   try {
-    const { prompt, productsJson } = req.body;
+    const { prompt, productsJson, baseImageUrl } = req.body;
     const tiers = JSON.parse(productsJson || '{}');
-    if (!req.file) throw new Error('Missing space image');
-
-    // build data URI for the room photo (faster than an extra upload step)
-    const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-    console.log('[FAL:compose] file:', { type: req.file.mimetype, size: req.file.size });
+    let baseImage = null;
+    if (req.file) {
+      baseImage = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+      console.log('[FAL:compose] file:', { type: req.file.mimetype, size: req.file.size });
+    } else if (typeof baseImageUrl === 'string' && baseImageUrl.trim()) {
+      baseImage = String(baseImageUrl).trim();
+      console.log('[FAL:compose] baseImageUrl used');
+    } else {
+      throw new Error('Missing base image (upload file as "space" or provide baseImageUrl)');
+    }
     console.log('[FAL:compose] tiers:', {
       low: (tiers.low || []).length,
       mid: (tiers.mid || []).length,
@@ -589,7 +594,7 @@ app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
         prompt:
           (prompt && String(prompt)) ||
           'Add only the referenced products to this exact room without changing the background or existing elements. Do not modify or remove any existing furniture, decor, walls, windows, floor, ceiling, or lighting. Preserve the original style, layout, colors, materials, geometry, perspective, and camera angle. Maintain natural lighting and shadows consistent with the room. Include every provided product exactly once; no duplicates, no substitutions, no omissions.',
-        image_urls: [dataUri, ...productUrls].filter(Boolean),
+        image_urls: [baseImage, ...productUrls].filter(Boolean),
         num_images: 1,
       };
       const out = await fal.subscribe('fal-ai/nano-banana/edit', { input });
@@ -646,7 +651,14 @@ app.post('/api/fal/finalize', async (req, res) => {
     console.log('[FAL:finalize] input image len:', selectedImageUrl.length);
 
     // Step 1: make an isometric-style view
-    const isoPrompt = "Reframe this room as a clean isometric view (30–40°)"
+    const isoPrompt = [
+      'Reframe this exact room as a clean isometric view (30–40°), orthographic feel.',
+      'The perspective should be isometric, looking down into the room from a diagonal angle.',
+      'Override any previous instruction that preserves the original background or camera perspective — change the viewpoint to isometric.',
+      selectedTier ? `Reflect arrangement consistent with the selected tier: ${String(selectedTier).toUpperCase()}.` : '',
+      Array.isArray(tierTitles) && tierTitles.length ? `Clearly depict: ${tierTitles.slice(0,8).join(', ')}.` : '',
+      'Maintain the room’s materials and objects; do not add or remove items beyond the selection. Preserve geometry and realistic lighting.'
+    ].filter(Boolean).join(' ');
 
     const iso = await fal.subscribe('fal-ai/nano-banana/edit', {
       input: {
@@ -734,11 +746,33 @@ app.post('/api/fal/3d', async (req, res) => {
 
     const glb = findFirstGlbUrl(threeD?.data);
     if (!glb) throw new Error('Trellis did not return a GLB url');
-
-    res.json({ glbUrl: glb });
+    console.log('[3D] GLB URL:', glb);
+    const proxyUrl = /^https?:\/\//i.test(glb) ? `/api/proxy?u=${encodeURIComponent(glb)}` : null;
+    res.json({ glbUrl: glb, proxyUrl });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// simple proxy for remote assets (e.g., GLB) with logging
+app.get('/api/proxy', async (req, res) => {
+  try {
+    const u = req.query.u;
+    if (typeof u !== 'string' || !/^https?:\/\//i.test(u)) return res.status(400).send('Invalid url');
+    console.log('[PROXY] GET', u);
+    const r = await fetchWithTimeout(u, {}, 20000);
+    if (!r.ok) return res.status(r.status).send('Upstream error');
+    // pass through headers
+    const ct = r.headers.get('content-type') || 'application/octet-stream';
+    res.setHeader('Content-Type', ct);
+    const disp = r.headers.get('content-disposition');
+    if (disp) res.setHeader('Content-Disposition', disp);
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.end(buf);
+  } catch (e) {
+    console.error('[PROXY] error', e?.message || e);
+    res.status(500).send('Proxy error');
   }
 });
 
