@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en">
-<head>
+  <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>RoomShop</title>
@@ -11,7 +11,8 @@
   </style>
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-</head>
+  <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+  </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
   <div class="max-w-xl mx-auto p-4">
     <header class="flex items-center justify-between gap-2">
@@ -50,6 +51,14 @@
       <div class="flex gap-2 items-center">
         <button id="btnVoice" class="px-3 py-2 rounded-xl bg-white/10">🎤 Hold to speak</button>
         <span id="voiceHint" class="text-sm opacity-70"></span>
+      </div>
+
+      <!-- Refine controls (shown after first results) -->
+      <div id="refineSection" class="mt-3 hidden">
+        <div class="flex gap-2 items-center">
+          <input id="refineInput" class="flex-1 p-3 rounded-xl bg-white/10" placeholder="Refine (e.g., 'more Scandinavian, add shelving; pricier lamp, cheaper shelves')" />
+          <button id="btnRefine" class="px-4 py-2 rounded-xl bg-white/10">Refine</button>
+        </div>
       </div>
     </section>
 
@@ -94,6 +103,18 @@
         <button id="productModalClose" class="text-sm opacity-70">Close</button>
       </div>
       <div id="productModalBody" class="overflow-y-auto space-y-2 pr-1"></div>
+    </div>
+  </div>
+
+  <!-- 3D viewer modal -->
+  <div id="modelModal" class="fixed inset-0 hidden z-50">
+    <div class="absolute inset-0 bg-black/60"></div>
+    <div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[92vw] max-w-lg bg-gray-900 rounded-2xl p-3 overflow-hidden">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm opacity-80">3D View</div>
+        <button id="modelModalClose" class="text-sm opacity-70">Close</button>
+      </div>
+      <model-viewer id="modelViewer" camera-controls style="width:100%; height:60vh; background:#111" autoplay></model-viewer>
     </div>
   </div>
 
@@ -222,8 +243,13 @@
     const budget = document.getElementById('budget');
     // zip removed
     const toggleImages = document.getElementById('toggleImages');
+    const refineSection = document.getElementById('refineSection');
+    const refineInput = document.getElementById('refineInput');
+    const btnRefine = document.getElementById('btnRefine');
 
     let latestCompose = { lowUrl: null, midUrl: null, highUrl: null };
+    let lastSearch = { description: '', budget: 150, image: true };
+    let lastIsoUrl = null;
 
     async function startSearch(fromVoice = false) {
       const useImages = !!toggleImages.checked;
@@ -237,6 +263,7 @@
       });
       const data = await r.json();
       if (!r.ok) return toast('Search error: ' + (data.error || 'unknown'));
+      lastSearch = { description, budget: b, image: useImages };
 
       // Build tier image sets for fal compose and remember which product items are used per tier
       const tiers = { low: [], mid: [], high: [] };
@@ -313,6 +340,8 @@
       video.classList.add('hidden');
       showControlsUI();
       renderProductList(data); // keep drawer for product-only browsing
+      // Show refine controls now that we have results
+      refineSection.classList.remove('hidden');
     }
 
     btnFind.onclick = startSearch;
@@ -408,7 +437,7 @@
     // finalize -> isometric + 3D
     const finalizeBtn = document.getElementById('finalize') || document.getElementById('finalizeDrawer');
     if (finalizeBtn) finalizeBtn.onclick = async () => {
-      const url = latestCompose.highUrl || latestCompose.midUrl || latestCompose.lowUrl;
+      const url = (selectedTier && latestCompose[`${selectedTier}Url`]) || latestCompose.highUrl || latestCompose.midUrl || latestCompose.lowUrl;
       if (!url) return toast('Nothing to finalize');
       setLoading(true, 'Finalizing...');
       const r = await fetch('/api/fal/finalize', {
@@ -422,9 +451,29 @@
       const box = document.getElementById('images');
       box.innerHTML = '';
       box.insertAdjacentHTML('beforeend', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Isometric</div><img class='w-full' src='${j.isoImageUrl}'/></div>`);
-      if (j.glbUrl) {
-        box.insertAdjacentHTML('beforeend', `<a class='block mt-3 underline' href='${j.glbUrl}' target='_blank'>Download 3D model (GLB)</a>`);
-      }
+      lastIsoUrl = j.isoImageUrl || null;
+      // Add Show in 3D button
+      const show3dBtnId = 'btnShow3D';
+      const old = document.getElementById(show3dBtnId);
+      if (old) old.remove();
+      const show3d = document.createElement('button');
+      show3d.id = show3dBtnId;
+      show3d.className = 'px-3 py-1.5 mt-2 rounded-xl bg-white/10 text-sm';
+      show3d.textContent = 'Show in 3D';
+      show3d.onclick = async () => {
+        if (!lastIsoUrl) return toast('No isometric view to convert');
+        setLoading(true, 'Generating 3D...');
+        const tr = await fetch('/api/fal/3d', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageUrl: lastIsoUrl }) });
+        const tj = await tr.json();
+        setLoading(false);
+        if (!tr.ok) return toast('3D error: ' + (tj.error || 'unknown'));
+        const glbUrl = tj.glbUrl;
+        if (!glbUrl) return toast('No 3D model');
+        const mv = document.getElementById('modelViewer');
+        mv.src = glbUrl;
+        document.getElementById('modelModal').classList.remove('hidden');
+      };
+      box.appendChild(show3d);
       openDrawer();
     };
 
@@ -556,3 +605,125 @@
   </script>
 </body>
 </html>
+    // 3D modal close handlers
+    document.getElementById('modelModalClose').onclick = () => document.getElementById('modelModal').classList.add('hidden');
+    document.getElementById('modelModal').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('modelModal')) document.getElementById('modelModal').classList.add('hidden');
+    });
+
+    // --- Refinement flow ---
+    function parseRefine(text) {
+      const t = (text || '').toLowerCase();
+      const categories = [];
+      const addCat = (name, bias=null) => categories.push({ name, bias });
+      const has = (w) => t.includes(w);
+      const catWords = {
+        shelving: ['shelf','shelving','bookcase','bookshelf'],
+        lamp: ['lamp','floor lamp','table lamp','lighting','light'],
+        rug: ['rug','area rug'],
+        sofa: ['sofa','couch','sectional'],
+        table: ['table','coffee table','side table','end table','console table'],
+      };
+      const allCats = Object.keys(catWords);
+      // heuristic: capture phrases like 'cheaper shelving', 'pricier lamp', 'more expensive lamp'
+      allCats.forEach(cat => {
+        const any = catWords[cat].some(w => has(w));
+        if (any) addCat(cat);
+      });
+      const cheaper = /(cheaper|less expensive|lower|budget)/i.test(text);
+      const pricier = /(pricier|more expensive|higher|upgrade)/i.test(text);
+      if (cheaper || pricier) {
+        categories.forEach(c => { c.bias = cheaper ? 'low' : 'high'; });
+        // category-specific bias: e.g., 'cheaper shelving' should only apply to shelving
+        Object.entries(catWords).forEach(([cat, words]) => {
+          if (new RegExp(`(cheaper|less expensive|lower)\s+(${words.map(w=>w.replace(/[-/\\^$*+?.()|[\]{}]/g,'\\$&')).join('|')})`, 'i').test(text)) {
+            const idx = categories.findIndex(c => c.name === cat);
+            if (idx >= 0) categories[idx].bias = 'low'; else categories.push({ name: cat, bias: 'low' });
+          }
+          if (new RegExp(`(pricier|more expensive|higher|upgrade)\s+(${words.map(w=>w.replace(/[-/\\^$*+?.()|[\]{}]/g,'\\$&')).join('|')})`, 'i').test(text)) {
+            const idx = categories.findIndex(c => c.name === cat);
+            if (idx >= 0) categories[idx].bias = 'high'; else categories.push({ name: cat, bias: 'high' });
+          }
+        });
+      }
+      let budgetShift = 1;
+      if (/(higher budget|increase budget|more expensive overall|upgrade overall)/i.test(text)) budgetShift = 1.3;
+      if (/(lower budget|decrease budget|cheaper overall|reduce overall)/i.test(text)) budgetShift = 0.8;
+      return { categories, budgetShift };
+    }
+
+    async function refineSearch() {
+      const txt = refineInput.value.trim();
+      if (!txt) return toast('Type how to refine');
+      const { categories, budgetShift } = parseRefine(txt);
+      const newBudget = Math.max(10, Math.round((lastSearch.budget || 150) * budgetShift));
+      const useImages = lastSearch.image;
+      if (useImages && !spaceBlob) return toast('Take or upload a room photo first');
+      setLoading(true, 'Refining...');
+      const r = await fetch('/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description: `${lastSearch.description}. ${txt}`, budget: newBudget, image: useImages }) });
+      const data = await r.json();
+      setLoading(false);
+      if (!r.ok) return toast('Refine error: ' + (data.error || 'unknown'));
+
+      // Build merged tiers: keep previous items + add category-matched items from chosen tiers
+      const perTierMax = 5;
+      const catMatch = (p, cat) => {
+        const s = `${p.title || ''} ${p.description || ''}`.toLowerCase();
+        const dict = { shelving: ['shelf','shelving','bookcase','bookshelf'], lamp: ['lamp','lighting','light'], rug: ['rug'], sofa: ['sofa','couch','sectional'], table: ['table','coffee','side','console'] };
+        return (dict[cat] || []).some(w => s.includes(w));
+      };
+      const tiers = { low: [], mid: [], high: [] };
+      const newSets = { low: data.low || [], mid: data.mid || [], high: data.high || [] };
+      // Start from previous used
+      const mergedUsed = { low: [...(tierProductsUsed.low||[])], mid: [...(tierProductsUsed.mid||[])], high: [...(tierProductsUsed.high||[])] };
+      const seen = new Set([...(mergedUsed.low||[]),...(mergedUsed.mid||[]),...(mergedUsed.high||[])].map(p => p.url || p.image || p.title));
+
+      for (const k of ['low','mid','high']) {
+        const list = mergedUsed[k] || [];
+        // Add matched categories with bias
+        categories.forEach(({ name, bias }) => {
+          const sourceTier = bias === 'low' ? 'low' : (bias === 'high' ? 'high' : k);
+          const src = newSets[sourceTier] || [];
+          for (const p of src) {
+            if (list.length >= perTierMax) break;
+            const key = p.url || p.image || p.title;
+            if (!key || seen.has(key)) continue;
+            if (!catMatch(p, name)) continue;
+            list.push(p); seen.add(key);
+          }
+        });
+        // Fill up with general items from the same tier
+        for (const p of (newSets[k] || [])) {
+          if (list.length >= perTierMax) break;
+          const key = p.url || p.image || p.title;
+          if (!key || seen.has(key)) continue;
+          list.push(p); seen.add(key);
+        }
+        // Convert to image URLs for compose
+        const images = new Set();
+        tiers[k] = [];
+        list.forEach(p => { if (p.image && !images.has(p.image)) { tiers[k].push(p.image); images.add(p.image); } });
+        mergedUsed[k] = list;
+      }
+      tierProductsUsed = mergedUsed;
+
+      // Compose again with merged products
+      if (!useImages) { renderProductList(data); openDrawer(); return; }
+      const fd = new FormData();
+      fd.append('space', spaceBlob, 'space.jpg');
+      fd.append('prompt', 'Add only the referenced products to this exact room without changing the background or existing elements. Do not modify or remove any existing furniture, decor, walls, windows, floor, ceiling, or lighting. Preserve original style, layout, colors, materials, geometry, and camera perspective; maintain natural lighting and scale. Include every provided product exactly once; no duplicates, no substitutions, no omissions.');
+      fd.append('productsJson', JSON.stringify(tiers));
+      setLoading(true, 'Updating visuals...');
+      const fr = await fetch('/api/fal/compose', { method: 'POST', body: fd });
+      const j = await fr.json();
+      setLoading(false);
+      if (!fr.ok) return toast('Compose error: ' + (j.error || 'unknown'));
+      latestCompose = j;
+      selectedTier = selectedTier || (j.highUrl ? 'high' : (j.midUrl ? 'mid' : 'low'));
+      updateCompositeView(selectedTier);
+      document.getElementById('compositeOverlay').classList.remove('hidden');
+      stopCam(); video.classList.add('hidden');
+      showControlsUI();
+      renderProductList(data);
+    }
+    btnRefine.onclick = refineSearch;

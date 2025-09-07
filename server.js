@@ -700,6 +700,48 @@ app.post('/api/fal/finalize', async (req, res) => {
   }
 });
 
+// --- API: Generate 3D GLB from an image (isometric or any) ---
+app.post('/api/fal/3d', async (req, res) => {
+  try {
+    const { imageUrl } = req.body || {};
+    if (!imageUrl) throw new Error('Missing imageUrl');
+
+    function findFirstGlbUrl(obj) {
+      try {
+        const stack = [obj];
+        while (stack.length) {
+          const cur = stack.pop();
+          if (!cur) continue;
+          if (typeof cur === 'string' && /\.glb(\?.*)?$/i.test(cur)) return cur;
+          if (Array.isArray(cur)) { for (const v of cur) stack.push(v); continue; }
+          if (typeof cur === 'object') {
+            for (const k of Object.keys(cur)) stack.push(cur[k]);
+          }
+        }
+      } catch {}
+      return null;
+    }
+
+    const threeD = await fal.subscribe('fal-ai/trellis', {
+      input: { image_url: imageUrl },
+      logs: true,
+      onQueueUpdate: (update) => {
+        if (update?.status === 'IN_PROGRESS' && Array.isArray(update.logs)) {
+          update.logs.map((l) => l.message).forEach((m) => console.log('[TRELLIS]', m));
+        }
+      },
+    });
+
+    const glb = findFirstGlbUrl(threeD?.data);
+    if (!glb) throw new Error('Trellis did not return a GLB url');
+
+    res.json({ glbUrl: glb });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 // --- API: ElevenLabs speech-to-text ---
 app.post('/api/stt', upload.single('audio'), async (req, res) => {
   try {
