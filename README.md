@@ -2,10 +2,10 @@ RoomShop
 
 URL: https://nano-banana-hack.onrender.com/
 
-Concise, camera-first concepting for room upgrades. Snap or upload your room photo, describe a vibe, and get IKEA-first product tiers (Low/Mid/High), quick composites, isometric view, voice input, and iterative refinements.
+Nano-banana for interior decoration. Takes a user's prompt to search a fitting addition to their room, update it, see it from a top-down isomorphic view and view it in 3d.
 
 Features
-- IKEA-first search by default; deduped product results.
+- IKEA-first search by default; Google custom search engine for shopping results
 - Voice input (press-and-hold via ElevenLabs STT).
 - L/M/H composites with your room photo (fal nano-banana/edit).
 - Finalize to an isometric view; optional “Show in 3D” to view a GLB in-app.
