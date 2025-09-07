@@ -1,5 +1,7 @@
 RoomShop
 
+URL: https://nano-banana-hack.onrender.com/
+
 Concise, camera-first concepting for room upgrades. Snap or upload your room photo, describe a vibe, and get IKEA-first product tiers (Low/Mid/High), quick composites, isometric view, voice input, and iterative refinements.
 
 Features
