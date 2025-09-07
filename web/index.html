@@ -8,6 +8,9 @@
   <style>
     .drawer { transition: transform 0.25s ease; }
     .drawer.closed { transform: translateX(100%); }
+    /* Emphasis styling for the right drawer open arrow */
+    #drawerOpen { transition: all 0.2s ease; }
+    #drawerOpen.highlight { font-size: 28px; padding: 12px 14px; background: rgb(16 185 129); color: rgb(17 24 39); box-shadow: 0 10px 20px rgba(16,185,129,0.35); }
   </style>
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -57,10 +60,6 @@
 
       <div class="flex items-center gap-3">
         <input id="budget" type="number" min="10" step="5" class="p-3 rounded-xl bg-white/10 w-40" placeholder="Budget (USD)" />
-        <label class="flex items-center gap-2 text-sm opacity-90 select-none">
-          <input id="toggleImages" type="checkbox" checked />
-          Images
-        </label>
         <button id="btnFind" class="ml-auto px-4 py-2 rounded-xl bg-emerald-500 text-black font-medium">Find options</button>
       </div>
 
@@ -104,7 +103,7 @@
       <div id="images" class="mt-3 grid gap-3"></div>
     </aside>
 
-    <button id="drawerOpen" class="fixed right-3 top-1/2 -translate-y-1/2 px-2 py-1 rounded-l-xl bg-white/10">▸</button>
+    <button id="drawerOpen" aria-label="Open products" class="fixed right-3 top-1/2 -translate-y-1/2 z-40 px-2 py-1 rounded-l-xl bg-white/10">▸</button>
   </div>
 
   <!-- Product modal -->
@@ -352,8 +351,12 @@
     const btnFind = document.getElementById('btnFind');
     const desc = document.getElementById('desc');
     const budget = document.getElementById('budget');
-    // zip removed
-    const toggleImages = document.getElementById('toggleImages');
+    // emphasize the products drawer arrow after images return
+    function emphasizeDrawerArrow(on = true) {
+      const btn = document.getElementById('drawerOpen');
+      if (!btn) return;
+      if (on) btn.classList.add('highlight'); else btn.classList.remove('highlight');
+    }
     const refineSection = document.getElementById('refineSection');
     const refineInput = document.getElementById('refineInput');
     const btnRefine = document.getElementById('btnRefine');
@@ -364,7 +367,7 @@
     let composeBaseUrl = null; // when set, compose uses existing composite instead of original room photo
 
     async function startSearch(fromVoice = false) {
-      const useImages = !!toggleImages.checked;
+      const useImages = true;
       const description = desc.value || 'home decor';
       const b = Number(budget.value || 150);
       if (useImages && !spaceBlob && !composeBaseUrl) {
@@ -426,14 +429,6 @@
         } catch (e) { console.warn('philosophy error', e); }
       }
 
-      // If images disabled -> only list products
-      if (!useImages) {
-        setLoading(false);
-        renderProductList(data);
-        openDrawer();
-        return;
-      }
-
       // compose with fal nano-banana/edit
       const fd = new FormData();
       if (composeBaseUrl) {
@@ -467,6 +462,7 @@
       stopCam();
       video.classList.add('hidden');
       showControlsUI();
+      emphasizeDrawerArrow(true);
       renderProductList(data); // keep drawer for product-only browsing
       // Show refine controls now that we have results
       refineSection.classList.remove('hidden');
@@ -555,6 +551,15 @@
       if (url) {
         img.src = url;
         selectedTier = tier;
+        // highlight selected tier button
+        document.querySelectorAll('.tierBtn').forEach(b => {
+          b.classList.remove('bg-emerald-500','text-black');
+          b.classList.add('bg-white/10','text-white');
+          if (b.dataset.tier === tier) {
+            b.classList.remove('bg-white/10','text-white');
+            b.classList.add('bg-emerald-500','text-black');
+          }
+        });
       }
     }
     document.querySelectorAll('.tierBtn').forEach(btn => btn.onclick = () => {
@@ -680,7 +685,7 @@
     const drawer = document.getElementById('drawer');
     const drawerOpen = document.getElementById('drawerOpen');
     const drawerClose = document.getElementById('drawerClose');
-    const openDrawer = () => drawer.classList.remove('closed');
+    const openDrawer = () => { drawer.classList.remove('closed'); emphasizeDrawerArrow(false); };
     const closeDrawer = () => drawer.classList.add('closed');
     drawerOpen.onclick = openDrawer;
     drawerClose.onclick = closeDrawer;
@@ -830,10 +835,9 @@
       if (!txt) return toast('Type how to refine');
       const { categories, budgetShift } = parseRefine(txt);
       const newBudget = Math.max(10, Math.round((lastSearch.budget || 150) * budgetShift));
-      const useImages = lastSearch.image;
-      if (useImages && !spaceBlob && !composeBaseUrl) return toast('Take or upload a room photo first');
+      if (!spaceBlob && !composeBaseUrl) return toast('Take or upload a room photo first');
       setLoading(true, 'Refining...');
-      const r = await fetch('/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description: `${lastSearch.description}. ${txt}`, budget: newBudget, image: useImages }) });
+      const r = await fetch('/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description: `${lastSearch.description}. ${txt}`, budget: newBudget, image: true }) });
       const data = await r.json();
       setLoading(false);
       if (!r.ok) return toast('Refine error: ' + (data.error || 'unknown'));
@@ -881,7 +885,6 @@
       tierProductsUsed = mergedUsed;
 
       // Compose again with merged products
-      if (!useImages) { renderProductList(data); openDrawer(); return; }
       const fd = new FormData();
       if (composeBaseUrl) fd.append('baseImageUrl', composeBaseUrl);
       else fd.append('space', spaceBlob, 'space.jpg');
@@ -898,6 +901,7 @@
       document.getElementById('compositeOverlay').classList.remove('hidden');
       stopCam(); video.classList.add('hidden');
       showControlsUI();
+      emphasizeDrawerArrow(true);
       renderProductList(data);
     }
     btnRefine.onclick = refineSearch;
