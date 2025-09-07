@@ -744,6 +744,10 @@ app.post('/api/fal/3d', async (req, res) => {
       },
     });
 
+    console.log('[3D] requestId:', threeD?.request_id || threeD?.requestId);
+    try {
+      console.log('[3D] data keys:', Object.keys(threeD?.data || {}));
+    } catch {}
     const glb = findFirstGlbUrl(threeD?.data);
     if (!glb) throw new Error('Trellis did not return a GLB url');
     console.log('[3D] GLB URL:', glb);

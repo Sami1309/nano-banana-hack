@@ -29,6 +29,16 @@
         <div id="compositeOverlay" class="absolute inset-0 hidden items-center justify-center">
           <img id="compositeImg" class="max-h-full max-w-full object-contain" alt="Composite" />
         </div>
+        <!-- Local loading over the frame only -->
+        <div id="frameLoading" class="absolute inset-0 hidden items-center justify-center bg-black/60 z-30">
+          <div class="flex items-center gap-3 bg-white text-black px-4 py-3 rounded-xl shadow">
+            <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+            </svg>
+            <span id="loadingTextFrame" class="text-sm">Loading...</span>
+          </div>
+        </div>
         <div class="absolute bottom-2 right-2 flex gap-2">
           <button id="btnSnap" class="px-3 py-2 bg-white/80 text-black rounded-xl">Snap</button>
           <label class="px-3 py-2 bg-white/20 rounded-xl cursor-pointer">Upload
@@ -118,16 +128,8 @@
     </div>
   </div>
 
-  <!-- Loading overlay -->
-  <div id="loading" class="fixed inset-0 hidden items-center justify-center bg-black/60 z-50">
-    <div class="flex items-center gap-3 bg-white text-black px-4 py-3 rounded-xl shadow">
-      <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
-      </svg>
-      <span id="loadingText" class="text-sm">Loading...</span>
-    </div>
-  </div>
+  <!-- Loading overlay (unused global; kept for fallback) -->
+  <div id="loading" class="hidden"></div>
 
   <script>
     // --- camera ---
@@ -167,6 +169,51 @@
       return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
     }
 
+    // Aspect helpers
+    let baseAspectW = 3, baseAspectH = 4;
+    function setBaseAspectFromUrl(url) {
+      try {
+        const tmp = new Image();
+        tmp.onload = () => { baseAspectW = tmp.naturalWidth || baseAspectW; baseAspectH = tmp.naturalHeight || baseAspectH; };
+        tmp.src = url;
+      } catch {}
+    }
+    function getTargetSize() {
+      const r = baseAspectW / baseAspectH;
+      const long = 1200;
+      if (r >= 1) return { w: long, h: Math.max(1, Math.round(long / r)) };
+      return { w: Math.max(1, Math.round(long * r)), h: long };
+    }
+    function loadImage(url) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+      });
+    }
+    async function normalizeToAspect(url) {
+      try {
+        const img = await loadImage(url);
+        const { w: tw, h: th } = getTargetSize();
+        const canvas = document.createElement('canvas');
+        canvas.width = tw; canvas.height = th;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, tw, th);
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+        const ir = iw / ih, tr = tw / th;
+        let dw, dh;
+        if (ir > tr) { dw = tw; dh = Math.round(tw / ir); }
+        else { dh = th; dw = Math.round(th * ir); }
+        const dx = Math.round((tw - dw) / 2), dy = Math.round((th - dh) / 2);
+        ctx.drawImage(img, 0, 0, iw, ih, dx, dy, dw, dh);
+        const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.95));
+        return URL.createObjectURL(blob);
+      } catch { return url; }
+    }
+
     const fileInput = document.getElementById('fileInput');
     let spaceBlob = null;
     let selectedTier = null;
@@ -180,6 +227,7 @@
         const url = URL.createObjectURL(spaceBlob);
         const img = document.getElementById('compositeImg');
         img.src = url;
+        setBaseAspectFromUrl(url);
         document.getElementById('compositeOverlay').classList.remove('hidden');
         // Ensure live camera is not visible underneath
         stopCam();
@@ -193,6 +241,7 @@
         const url = URL.createObjectURL(spaceBlob);
         const img = document.getElementById('compositeImg');
         img.src = url;
+        setBaseAspectFromUrl(url);
         document.getElementById('compositeOverlay').classList.remove('hidden');
         // Ensure live camera is not visible underneath
         stopCam();
@@ -341,7 +390,12 @@
       setLoading(false);
       if (!fr.ok) return toast('fal compose error: ' + (j.error || 'unknown'));
 
-      latestCompose = j;
+      // Normalize outputs to match base aspect
+      latestCompose = {
+        lowUrl: await normalizeToAspect(j.lowUrl),
+        midUrl: await normalizeToAspect(j.midUrl),
+        highUrl: await normalizeToAspect(j.highUrl),
+      };
       // Show overlay and bottom bar
       selectedTier = j.highUrl ? 'high' : (j.midUrl ? 'mid' : 'low');
       updateCompositeView(selectedTier);
@@ -459,10 +513,11 @@
       setLoading(false);
       if (!r.ok) return toast('Finalize error: ' + (j.error || 'unknown'));
 
+      const isoNorm = j.isoImageUrl ? await normalizeToAspect(j.isoImageUrl) : null;
       const box = document.getElementById('images');
       box.innerHTML = '';
-      box.insertAdjacentHTML('beforeend', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Isometric</div><img class='w-full' src='${j.isoImageUrl}'/></div>`);
-      lastIsoUrl = j.isoImageUrl || null;
+      if (isoNorm) box.insertAdjacentHTML('beforeend', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Isometric</div><img class='w-full' src='${isoNorm}'/></div>`);
+      lastIsoUrl = isoNorm || null;
       // Add Show in 3D button
       const show3dBtnId = 'btnShow3D';
       const old = document.getElementById(show3dBtnId);
@@ -508,7 +563,7 @@
       setLoading(false);
       if (!rr.ok) return toast('Reorganize error: ' + (rj.error || 'unknown'));
       // Show reorganized image as the current overlay and add to drawer
-      const url = rj.reorgUrl;
+      const url = rj.reorgUrl ? await normalizeToAspect(rj.reorgUrl) : null;
       if (url) {
         const img = document.getElementById('compositeImg');
         img.src = url;
@@ -580,9 +635,9 @@
     }
 
     function setLoading(on, text) {
-      const el = document.getElementById('loading');
-      const t = document.getElementById('loadingText');
-      if (typeof text === 'string') t.textContent = text;
+      const el = document.getElementById('frameLoading');
+      const t = document.getElementById('loadingTextFrame');
+      if (typeof text === 'string' && t) t.textContent = text;
       if (on) {
         el.classList.remove('hidden');
         el.classList.add('flex');
