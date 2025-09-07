@@ -594,7 +594,9 @@
       const box = document.getElementById('images');
       box.innerHTML = '';
       if (isoNorm) box.insertAdjacentHTML('beforeend', `<div class='rounded-xl overflow-hidden bg-white/5'><div class='p-2 text-sm opacity-80'>Isometric</div><img class='w-full' src='${isoNorm}'/></div>`);
+      // Keep both the normalized (display) URL and the original remote URL
       lastIsoUrl = isoNorm || null;
+      window.__lastIsoRemoteUrl = j.isoImageUrl || null;
       // Add Show in 3D button
       const show3dBtnId = 'btnShow3D';
       const old = document.getElementById(show3dBtnId);
@@ -604,9 +606,16 @@
       show3d.className = 'px-3 py-1.5 mt-2 rounded-xl bg-white/10 text-sm';
       show3d.textContent = 'Show in 3D';
       show3d.onclick = async () => {
-        if (!lastIsoUrl) return toast('No isometric view to convert');
+        const remote = window.__lastIsoRemoteUrl;
+        if (!remote && !lastIsoUrl) return toast('No isometric view to convert');
         setLoading(true, 'Generating 3D...');
-        const tr = await fetch('/api/fal/3d', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageUrl: lastIsoUrl }) });
+        let payload = {};
+        if (remote && /^https?:\/\//i.test(remote)) payload.imageUrl = remote;
+        else if (lastIsoUrl) {
+          try { payload.imageDataUrl = await srcToDataUrl(lastIsoUrl); }
+          catch (e) { console.warn('dataUrl fallback failed', e); payload.imageUrl = lastIsoUrl; }
+        }
+        const tr = await fetch('/api/fal/3d', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const tj = await tr.json();
         setLoading(false);
         if (!tr.ok) return toast('3D error: ' + (tj.error || 'unknown'));

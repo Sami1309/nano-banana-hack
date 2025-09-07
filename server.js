@@ -734,8 +734,12 @@ app.post('/api/fal/finalize', async (req, res) => {
 // --- API: Generate 3D GLB from an image (isometric or any) ---
 app.post('/api/fal/3d', async (req, res) => {
   try {
-    const { imageUrl } = req.body || {};
-    if (!imageUrl) throw new Error('Missing imageUrl');
+    const { imageUrl, imageDataUrl } = req.body || {};
+    const imgArg = (typeof imageDataUrl === 'string' && imageDataUrl.startsWith('data:'))
+      ? imageDataUrl
+      : imageUrl;
+    if (!imgArg) throw new Error('Missing imageUrl');
+    console.log('[3D] input image:', (imgArg || '').slice(0, 64));
 
     function findFirstGlbUrl(obj) {
       try {
@@ -753,8 +757,28 @@ app.post('/api/fal/3d', async (req, res) => {
       return null;
     }
 
+    // helper to find first absolute URL in nested data
+    function findFirstAbsoluteUrl(obj) {
+      try {
+        const stack = [obj];
+        while (stack.length) {
+          const cur = stack.pop();
+          if (!cur) continue;
+          if (typeof cur === 'string' && /^https?:\/\//i.test(cur)) return cur;
+          if (Array.isArray(cur)) { for (const v of cur) stack.push(v); continue; }
+          if (typeof cur === 'object') { for (const k of Object.keys(cur)) stack.push(cur[k]); }
+        }
+      } catch {}
+      return null;
+    }
+
+    // Reject blob: URLs early; they are not fetchable from server
+    if (typeof imgArg === 'string' && /^blob:/i.test(imgArg)) {
+      return res.status(422).json({ error: 'Unprocessable Entity: blob URL not fetchable; send an absolute URL or data URI' });
+    }
+
     const threeD = await fal.subscribe('fal-ai/trellis', {
-      input: { image_url: imageUrl },
+      input: { image_url: imgArg },
       logs: true,
       onQueueUpdate: (update) => {
         if (update?.status === 'IN_PROGRESS' && Array.isArray(update.logs)) {
