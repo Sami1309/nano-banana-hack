@@ -571,17 +571,20 @@ For each tier, write 2 concise sentences that explain the philosophy behind the 
 // --- API: Compose L/M/H images with fal nano-banana/edit ---
 app.post('/api/fal/compose', upload.single('space'), async (req, res) => {
   try {
-    const { prompt, productsJson, baseImageUrl } = req.body;
+    const { prompt, productsJson, baseImageUrl, baseImageDataUrl } = req.body;
     const tiers = JSON.parse(productsJson || '{}');
     let baseImage = null;
-    if (req.file) {
+    if (typeof baseImageDataUrl === 'string' && baseImageDataUrl.startsWith('data:')) {
+      baseImage = baseImageDataUrl.trim();
+      console.log('[FAL:compose] baseImageDataUrl used (len=%d)', baseImage.length);
+    } else if (req.file) {
       baseImage = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
       console.log('[FAL:compose] file:', { type: req.file.mimetype, size: req.file.size });
     } else if (typeof baseImageUrl === 'string' && baseImageUrl.trim()) {
       baseImage = String(baseImageUrl).trim();
       console.log('[FAL:compose] baseImageUrl used');
     } else {
-      throw new Error('Missing base image (upload file as "space" or provide baseImageUrl)');
+      throw new Error('Missing base image (upload file as "space" or provide baseImageUrl/baseImageDataUrl)');
     }
     console.log('[FAL:compose] tiers:', {
       low: (tiers.low || []).length,
@@ -646,9 +649,12 @@ app.post('/api/fal/reorganize', upload.single('space'), async (req, res) => {
 // --- API: Finalize -> isometric edit, then 3D with Hunyuan3D v2.1 ---
 app.post('/api/fal/finalize', async (req, res) => {
   try {
-    const { selectedImageUrl, selectedTier, tierTitles } = req.body;
-    if (!selectedImageUrl) throw new Error('Missing selectedImageUrl');
-    console.log('[FAL:finalize] input image len:', selectedImageUrl.length);
+    const { selectedImageUrl, selectedImageDataUrl, selectedTier, tierTitles } = req.body;
+    const img = (typeof selectedImageDataUrl === 'string' && selectedImageDataUrl.startsWith('data:'))
+      ? selectedImageDataUrl
+      : selectedImageUrl;
+    if (!img) throw new Error('Missing selected image');
+    console.log('[FAL:finalize] input image len:', img.length);
 
     // Step 1: make an isometric-style view
     const isoPrompt = [
@@ -663,7 +669,7 @@ app.post('/api/fal/finalize', async (req, res) => {
     const iso = await fal.subscribe('fal-ai/nano-banana/edit', {
       input: {
         prompt: isoPrompt,
-        image_urls: [selectedImageUrl],
+        image_urls: [img],
         num_images: 1,
       },
     });
@@ -687,6 +693,19 @@ app.post('/api/fal/finalize', async (req, res) => {
           if (typeof cur === 'object') {
             for (const k of Object.keys(cur)) stack.push(cur[k]);
           }
+        }
+      } catch {}
+      return null;
+    }
+    function findFirstAbsoluteUrl(obj) {
+      try {
+        const stack = [obj];
+        while (stack.length) {
+          const cur = stack.pop();
+          if (!cur) continue;
+          if (typeof cur === 'string' && /^https?:\/\//i.test(cur)) return cur;
+          if (Array.isArray(cur)) { for (const v of cur) stack.push(v); continue; }
+          if (typeof cur === 'object') { for (const k of Object.keys(cur)) stack.push(cur[k]); }
         }
       } catch {}
       return null;
@@ -748,8 +767,12 @@ app.post('/api/fal/3d', async (req, res) => {
     try {
       console.log('[3D] data keys:', Object.keys(threeD?.data || {}));
     } catch {}
-    const glb = findFirstGlbUrl(threeD?.data);
+    let glb = findFirstGlbUrl(threeD?.data);
     if (!glb) throw new Error('Trellis did not return a GLB url');
+    const baseAbs = findFirstAbsoluteUrl(threeD?.data);
+    if (glb.startsWith('/') && baseAbs) {
+      try { const o = new URL(baseAbs); glb = `${o.origin}${glb}`; } catch {}
+    }
     console.log('[3D] GLB URL:', glb);
     const proxyUrl = /^https?:\/\//i.test(glb) ? `/api/proxy?u=${encodeURIComponent(glb)}` : null;
     res.json({ glbUrl: glb, proxyUrl });

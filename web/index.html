@@ -47,7 +47,7 @@
         </div>
       </div>
 
-      <textarea id="desc" class="w-full p-3 rounded-xl bg-white/10" rows="3" placeholder="Describe what you want (e.g., ‘modern floor lamp in brass’)"></textarea>
+      <textarea id="desc" class="w-full p-3 rounded-xl bg-white/10" rows="3" placeholder="Describe what you want (e.g., ‘modern shelving unit’)"></textarea>
 
       <div class="flex items-center gap-3">
         <input id="budget" type="number" min="10" step="5" class="p-3 rounded-xl bg-white/10 w-40" placeholder="Budget (USD)" />
@@ -376,7 +376,10 @@
 
       // compose with fal nano-banana/edit
       const fd = new FormData();
-      if (composeBaseUrl) fd.append('baseImageUrl', composeBaseUrl);
+      if (composeBaseUrl) {
+        try { const dataUrl = await srcToDataUrl(composeBaseUrl); fd.append('baseImageDataUrl', dataUrl); }
+        catch { fd.append('baseImageUrl', composeBaseUrl); }
+      }
       else fd.append('space', spaceBlob, 'space.jpg');
       const intent = data.intent || {};
       const composeNote = (intent.specific && !intent.general)
@@ -501,13 +504,22 @@
 
     // finalize -> isometric + 3D
     const finalizeBtn = document.getElementById('finalize') || document.getElementById('finalizeDrawer');
+    // helper: convert an image src (blob/remote) to data URL (for server consumption)
+    async function srcToDataUrl(src) {
+      const res = await fetch(src);
+      const blob = await res.blob();
+      return await new Promise((resolve) => { const r = new FileReader(); r.onloadend = () => resolve(r.result); r.readAsDataURL(blob); });
+    }
+
     if (finalizeBtn) finalizeBtn.onclick = async () => {
       const url = (selectedTier && latestCompose[`${selectedTier}Url`]) || latestCompose.highUrl || latestCompose.midUrl || latestCompose.lowUrl;
       if (!url) return toast('Nothing to finalize');
       setLoading(true, 'Finalizing...');
+      let dataUrl = null;
+      try { dataUrl = await srcToDataUrl(url); } catch {}
       const r = await fetch('/api/fal/finalize', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selectedImageUrl: url, selectedTier, tierTitles: (tierProductsUsed[selectedTier]||[]).map(p=>p.title).filter(Boolean) })
+        body: JSON.stringify({ selectedImageUrl: url, selectedImageDataUrl: dataUrl, selectedTier, tierTitles: (tierProductsUsed[selectedTier]||[]).map(p=>p.title).filter(Boolean) })
       });
       const j = await r.json();
       setLoading(false);
@@ -550,7 +562,10 @@
       if (!selectedTier) return toast('Select a tier first');
       if (!spaceBlob) return toast('Take or upload a room photo first');
       const fd = new FormData();
-      if (composeBaseUrl) fd.append('baseImageUrl', composeBaseUrl);
+      if (composeBaseUrl) {
+        try { const dataUrl = await srcToDataUrl(composeBaseUrl); fd.append('baseImageDataUrl', dataUrl); }
+        catch { fd.append('baseImageUrl', composeBaseUrl); }
+      }
       else fd.append('space', spaceBlob, 'space.jpg');
       const tiers = { low: [], mid: [], high: [] };
       const images = new Set();
