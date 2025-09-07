@@ -720,10 +720,25 @@ app.post('/api/fal/finalize', async (req, res) => {
         }
       },
     });
-
-    const glb = findFirstGlbUrl(threeD?.data);
+    const reqId = threeD?.request_id || threeD?.requestId;
+    // Query the final result for fully-resolved URLs
+    let result;
+    try { result = await fal.queue.result('fal-ai/trellis', { requestId: reqId }); }
+    catch (e) { console.warn('[FINALIZE 3D] queue.result failed, using subscribe data', e?.message || e); }
+    const baseAbs = findFirstAbsoluteUrl(result?.data) || findFirstAbsoluteUrl(threeD?.data);
+    let fileUrl = result?.data?.model_mesh?.url;
+    if (fileUrl && !/^https?:\/\//i.test(fileUrl)) {
+      try {
+        if (baseAbs) fileUrl = new URL(fileUrl, baseAbs).toString();
+        else if (reqId) fileUrl = new URL(fileUrl, `https://queue.fal.run/fal-ai/trellis/requests/${reqId}/`).toString();
+      } catch {}
+    }
+    if (fileUrl) return res.json({ isoImageUrl: isoUrl, glbUrl: fileUrl });
+    // Fallback scanning
+    let glb = findFirstGlbUrl(result?.data) || findFirstGlbUrl(threeD?.data);
     if (!glb) throw new Error('Trellis did not return a GLB url');
-
+    if (baseAbs && !/^https?:\/\//i.test(glb)) { try { glb = new URL(glb, baseAbs).toString(); } catch {} }
+    if (!/^https?:\/\//i.test(glb) && reqId) { try { glb = new URL(glb, `https://queue.fal.run/fal-ai/trellis/requests/${reqId}/`).toString(); } catch {} }
     res.json({ isoImageUrl: isoUrl, glbUrl: glb });
   } catch (err) {
     console.error(err);
@@ -787,15 +802,48 @@ app.post('/api/fal/3d', async (req, res) => {
       },
     });
 
-    console.log('[3D] requestId:', threeD?.request_id || threeD?.requestId);
+    const reqId = threeD?.request_id || threeD?.requestId;
+    console.log('[3D] requestId:', reqId);
     try {
       console.log('[3D] data keys:', Object.keys(threeD?.data || {}));
     } catch {}
-    let glb = findFirstGlbUrl(threeD?.data);
+
+    // Query final result via queue.result to get fully-resolved file URLs
+    let result;
+    try { result = await fal.queue.result('fal-ai/trellis', { requestId: reqId }); }
+    catch (e) { console.warn('[3D] queue.result failed (using subscribe data)', e?.message || e); }
+
+    const baseAbs = findFirstAbsoluteUrl(result?.data) || findFirstAbsoluteUrl(threeD?.data);
+    let fileUrl = result?.data?.model_mesh?.url;
+    const fileType = result?.data?.model_mesh?.content_type;
+    if (fileUrl) {
+      if (!/^https?:\/\//i.test(fileUrl)) {
+        try {
+          if (baseAbs) fileUrl = new URL(fileUrl, baseAbs).toString();
+          else if (reqId) fileUrl = new URL(fileUrl, `https://queue.fal.run/fal-ai/trellis/requests/${reqId}/`).toString();
+        } catch {}
+      }
+      console.log('[3D] model_mesh url:', fileUrl, 'type:', fileType);
+      const proxyUrl = /^https?:\/\//i.test(fileUrl) ? `/api/proxy?u=${encodeURIComponent(fileUrl)}` : null;
+      return res.json({ glbUrl: fileUrl, proxyUrl });
+    }
+
+    // Fallback: traverse for any .glb link
+    let glb = findFirstGlbUrl(result?.data) || findFirstGlbUrl(threeD?.data);
     if (!glb) throw new Error('Trellis did not return a GLB url');
-    const baseAbs = findFirstAbsoluteUrl(threeD?.data);
-    if (glb.startsWith('/') && baseAbs) {
-      try { const o = new URL(baseAbs); glb = `${o.origin}${glb}`; } catch {}
+    if (baseAbs && !/^https?:\/\//i.test(glb)) {
+      try {
+        if (glb.startsWith('/')) {
+          const o = new URL(baseAbs);
+          glb = `${o.origin}${glb}`;
+        } else {
+          glb = new URL(glb, baseAbs).toString();
+        }
+      } catch (e) { console.warn('[3D] Failed to resolve relative GLB with base', baseAbs, e?.message || e); }
+    }
+    if (!/^https?:\/\//i.test(glb) && reqId) {
+      try { glb = new URL(glb, `https://queue.fal.run/fal-ai/trellis/requests/${reqId}/`).toString(); }
+      catch (e) { console.warn('[3D] Could not resolve GLB against queue base', e?.message || e); }
     }
     console.log('[3D] GLB URL:', glb);
     const proxyUrl = /^https?:\/\//i.test(glb) ? `/api/proxy?u=${encodeURIComponent(glb)}` : null;
